@@ -4,44 +4,39 @@
 #   curl -fsSL https://raw.githubusercontent.com/salehx11sa/srca-monitor/main/deploy/tablet.sh | bash
 #
 # ما يسويه:
-#  - بيئة لينكس (Ubuntu) معزولة داخل Termux فيها متصفح خاص بالرصد (لا يلمس كروم التابلت).
+#  - بيئة لينكس (Debian) معزولة داخل Termux فيها متصفح خاص بالرصد (لا يلمس كروم التابلت).
 #  - الرصد كل 30 دقيقة (:05 و:35)، الملخص اليومي 8:00، الأسبوعي الأحد 8:10، الشهري أول الشهر 8:20 — بتوقيت الرياض.
 #  - تشغيل تلقائي بعد إعادة الإقلاع عبر ملف مستقل: ~/.termux/boot/srca-boot.sh
 # ما لا يلمسه أبدًا: tyworker.py · tyhelper.dex · .tyworker.json · tyw-*.sh · boot/tyw-boot.sh · crontab · كروم.
 set -e
 R=https://github.com/salehx11sa/srca-monitor.git
-D=ubuntu
+D=debian   # متصفح Debian الرسمي يُنزّل من نفس خوادم البرامج (أثبت من خادم Playwright على شبكة البيت)
 say() { printf '\n\033[1;32m== %s ==\033[0m\n' "$1"; }
 
 say "1/5 تجهيز Termux"
+dpkg --configure -a >/dev/null 2>&1 || true
 pkg update -y >/dev/null 2>&1 || true
 pkg install -y proot-distro git curl util-linux procps >/dev/null
 
 say "2/5 بيئة لينكس (أول مرة تاخذ 5-10 دقائق)"
-if [ ! -d "$PREFIX/var/lib/proot-distro/installed-rootfs/$D" ]; then
-  proot-distro install $D
-fi
+proot-distro login $D -- true >/dev/null 2>&1 || proot-distro install $D
 IN() { proot-distro login $D --shared-tmp -- bash -lc "$1"; }
 
-say "3/5 الكود والمتصفح (10-15 دقيقة)"
+say "3/5 الكود والمتصفح (10-20 دقيقة)"
 IN "export DEBIAN_FRONTEND=noninteractive TZ=Asia/Riyadh
-apt-get update -y >/dev/null && apt-get install -y python3 python3-venv python3-pip git tzdata >/dev/null
+apt-get update -y >/dev/null && apt-get install -y -o Acquire::Retries=10 python3 python3-venv python3-pip git tzdata chromium fonts-noto-core >/dev/null
 [ -d /root/srca-monitor/.git ] && git -C /root/srca-monitor pull -q --ff-only || git clone -q $R /root/srca-monitor
 cd /root/srca-monitor && python3 -m venv .venv && .venv/bin/pip install -q --upgrade pip && .venv/bin/pip install -q -r requirements.txt
-.venv/bin/python -m playwright install-deps chromium >/dev/null && { PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT=600000 .venv/bin/python -m playwright install chromium || ls /opt/pw-browsers/chromium-*/chrome-linux*/chrome || {
-  apt-get install -y unzip curl >/dev/null; mkdir -p /opt/pw-browsers/chromium-cft && cd /opt/pw-browsers/chromium-cft &&
-  curl -fL -C - --retry 30 --retry-delay 5 --retry-all-errors -o c.zip https://cdn.playwright.dev/builds/cft/153.0.8010.12/linux-arm64/chrome-linux-arm64.zip &&
-  unzip -q -o c.zip && rm -f c.zip; }; }"
+test -x /usr/lib/chromium/chromium && echo 'المتصفح جاهز'"
 
 say "4/5 المفاتيح"
-ENVF=$PREFIX/var/lib/proot-distro/installed-rootfs/$D/root/srca-monitor/.env
-if [ ! -s "$ENVF" ]; then
-  echo "الصق محتوى ملف «مفاتيح-التابلت.txt» كاملًا، ثم اضغط Enter، ثم Ctrl+D (أو CTRL ثم d من شريط مفاتيح Termux):"
-  cat > "$ENVF" < /dev/tty
-  chmod 600 "$ENVF"
+if ! IN "grep -q '^X_AUTH_TOKEN=' /root/srca-monitor/.env 2>/dev/null"; then
+  echo "الصق محتوى ملف «مفاتيح-التابلت.txt» كاملًا، ثم اضغط Enter، ثم CTRL ثم d:"
+  proot-distro login $D -- bash -c "cat > /root/srca-monitor/.env; chmod 600 /root/srca-monitor/.env" < /dev/tty
 fi
-grep -q '^X_AUTH_TOKEN=' "$ENVF" || { echo "!! الملف ناقص (ما فيه X_AUTH_TOKEN). احذفه وأعد التشغيل: rm $ENVF"; exit 1; }
-grep -q '^SRCA_RUNNER=' "$ENVF" || echo "SRCA_RUNNER=server" >> "$ENVF"
+IN "cd /root/srca-monitor && grep -q '^X_AUTH_TOKEN=' .env || { echo '!! المفاتيح ناقصة. أعد التشغيل والصقها كاملة.'; rm -f .env; exit 1; }
+grep -q '^SRCA_RUNNER=' .env || echo SRCA_RUNNER=server >> .env
+grep -q '^CHROME_PATH=' .env || echo CHROME_PATH=/usr/lib/chromium/chromium >> .env"
 
 say "5/5 الجدولة"
 cat > ~/srca-loop.sh <<'LOOP'
@@ -51,7 +46,7 @@ exec 9>~/.srca-loop.lock
 flock -n 9 || exit 0
 export TZ=Asia/Riyadh
 run() { # $1 = run|daily|weekly|monthly
-  proot-distro login ubuntu --shared-tmp -- bash -lc \
+  proot-distro login debian --shared-tmp -- bash -lc \
     "cd /root/srca-monitor && git pull -q --ff-only 2>/dev/null; TZ=Asia/Riyadh timeout 1500 .venv/bin/python -m srca.main $1" \
     >> ~/srca-$1.log 2>&1
   tail -n 400 ~/srca-$1.log > ~/srca-$1.log.tmp && mv ~/srca-$1.log.tmp ~/srca-$1.log
