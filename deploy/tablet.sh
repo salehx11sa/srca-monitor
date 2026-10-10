@@ -28,7 +28,10 @@ IN "export DEBIAN_FRONTEND=noninteractive TZ=Asia/Riyadh
 apt-get update -y >/dev/null && apt-get install -y python3 python3-venv python3-pip git tzdata >/dev/null
 [ -d /root/srca-monitor/.git ] && git -C /root/srca-monitor pull -q --ff-only || git clone -q $R /root/srca-monitor
 cd /root/srca-monitor && python3 -m venv .venv && .venv/bin/pip install -q --upgrade pip && .venv/bin/pip install -q -r requirements.txt
-.venv/bin/python -m playwright install-deps chromium >/dev/null && .venv/bin/python -m playwright install chromium"
+.venv/bin/python -m playwright install-deps chromium >/dev/null && { PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT=600000 .venv/bin/python -m playwright install chromium || ls /opt/pw-browsers/chromium-*/chrome-linux*/chrome || {
+  apt-get install -y unzip curl >/dev/null; mkdir -p /opt/pw-browsers/chromium-cft && cd /opt/pw-browsers/chromium-cft &&
+  curl -fL -C - --retry 30 --retry-delay 5 --retry-all-errors -o c.zip https://cdn.playwright.dev/builds/cft/153.0.8010.12/linux-arm64/chrome-linux-arm64.zip &&
+  unzip -q -o c.zip && rm -f c.zip; }; }"
 
 say "4/5 المفاتيح"
 ENVF=$PREFIX/var/lib/proot-distro/installed-rootfs/$D/root/srca-monitor/.env
