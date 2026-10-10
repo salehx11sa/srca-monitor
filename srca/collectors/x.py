@@ -30,60 +30,84 @@ def _to_item(t):
                 retweet=t.get("rt", False), verified=t.get("vt", ""), followers=t.get("fo"))
 
 
+def _search(pg, raw):
+    """يفتح صفحة البحث (الأحدث) مباشرة ويلتقط رد SearchTimeline. يرجع (status, json, reset)."""
+    from urllib.parse import quote
+    url = "https://x.com/search?q=" + quote(raw) + "&src=typed_query&f=live"
+    try:
+        with pg.expect_response(lambda r: "SearchTimeline" in r.url and r.request.method == "GET", timeout=30000) as info:
+            pg.goto(url, wait_until="domcontentloaded", timeout=60000)
+        r = info.value
+        j = None
+        try:
+            j = r.json()
+        except Exception:
+            pass
+        return r.status, j, r.headers.get("x-rate-limit-reset"), r.headers.get("x-rate-limit-remaining")
+    except Exception as e:
+        if "/search" not in pg.url:
+            raise SourceDown("LOGIN_REQUIRED " + pg.url.split("?")[0])
+        return "TIMEOUT", None, None, None
+
+
 def _run_with(token, cut_unix, keys=None):
+    """كل استعلام يُفتح كصفحة مستقلة (أثبت من التنقل الداخلي الذي قد يعيد تحميل الصفحة)."""
+    db, qlog, rl, stopped, reset = {}, [], None, "DONE", None
     with chrome(_cookies(token)) as ctx:
+        ctx.add_init_script(JS)  # أداة التحليل متاحة في كل صفحة
         pg = ctx.new_page()
         pg.goto("https://x.com/home", wait_until="domcontentloaded", timeout=60000)
-        # ننتظر استقرار الصفحة: X أحيانًا يحوّل بعد التحميل (تسجيل دخول/تحقق من جهاز جديد)
-        last, stable = pg.url, 0
-        for _ in range(20):
-            time.sleep(1.5)
-            stable = stable + 1 if pg.url == last else 0
-            last = pg.url
-            if stable >= 4:
-                break
+        time.sleep(5)
         if "/home" not in pg.url:
             raise SourceDown("LOGIN_REQUIRED " + pg.url.split("?")[0])
-        for attempt in range(3):
-            try:
-                pg.evaluate(JS)
-                break
-            except Exception as e:
-                if "context was destroyed" not in str(e) and "navigation" not in str(e).lower():
-                    raise
-                pg.wait_for_load_state("domcontentloaded", timeout=30000)
-                time.sleep(4)
-                if "/home" not in pg.url:
-                    raise SourceDown("LOGIN_REQUIRED " + pg.url.split("?")[0])
-        else:
-            raise SourceDown("X_PAGE_UNSTABLE " + pg.url.split("?")[0])
-        opts = {"pagesCap": config.X_PAGES_CAP}
-        if keys:
-            opts["keys"] = keys
-        res = None
-        for attempt in range(3):
-            try:
-                res = pg.evaluate("([c,o])=>SRCA.run(c,o)", [cut_unix, opts])
-            except Exception as e:
-                if "context was destroyed" in str(e):
-                    time.sleep(3)
-                    raise SourceDown("X_REDIRECTED " + pg.url.split("?")[0])
-                raise
-            if res.get("stopped") != "429":
-                break
-            wait = int(res.get("reset") or 0) - time.time() + 5
-            if wait > 720:
-                break
-            log.info("X: حد الطلبات، انتظار %ss", int(max(wait, 30)))
-            time.sleep(max(wait, 30))
-        qlog = pg.evaluate("SRCA.log")
-        tweets = pg.evaluate("SRCA.all()")
-        rl = pg.evaluate("SRCA.lastRL")
+        qs = pg.evaluate("SRCA.QS")
+        queue = [{"k": k, "until": None, "pages": 0, "got": 0, "tries": 0} for k in (keys or list(qs))]
+        waited = 0
+        while queue:
+            it = queue[0]
+            raw = qs[it["k"]] + f" since_time:{cut_unix}" + (f" until_time:{it['until']}" if it["until"] else "")
+            status, j, rs, rem = _search(pg, raw)
+            if rem is not None:
+                rl = f"{rem}/{rs}"
+            if status == 429:
+                wait = int(rs or 0) - time.time() + 5
+                if wait > 720 or waited >= 2:
+                    stopped, reset = "429", rs
+                    break
+                waited += 1
+                log.info("X: حد الطلبات، انتظار %ss", int(max(wait, 30)))
+                time.sleep(max(wait, 30))
+                continue
+            if status != 200 or not j:
+                it["tries"] += 1
+                if it["tries"] >= 3:
+                    qlog.append({"k": it["k"], "status": "TIMEOUT" if status == "TIMEOUT" else f"HTTP{status}", "pages": it["pages"]})
+                    queue.pop(0)
+                continue
+            it["pages"] += 1
+            tw = pg.evaluate("j => SRCA.parse(j)", j)
+            for t in tw:
+                if parse_dt(t["t"]).timestamp() < cut_unix:
+                    continue
+                if t["id"] not in db:
+                    t["qs"] = [it["k"]]
+                    db[t["id"]] = t
+                    it["got"] += 1
+                elif it["k"] not in db[t["id"]]["qs"]:
+                    db[t["id"]]["qs"].append(it["k"])
+            oldest = int(min(parse_dt(t["t"]).timestamp() for t in tw)) if tw else 0
+            done = not tw or oldest <= cut_unix or it["pages"] >= config.X_PAGES_CAP or (it["until"] and oldest >= it["until"])
+            if done:
+                qlog.append({"k": it["k"], "pages": it["pages"], "got": it["got"],
+                             "status": "end" if not tw else "cut" if oldest <= cut_unix else "CAP"})
+                queue.pop(0)
+            else:
+                it["until"] = oldest
     bad = sum(1 for x in qlog if str(x.get("status", "")).startswith(("TIMEOUT", "HTTP")))
-    status = "DONE" if res.get("stopped") == "DONE" else "PARTIAL_429"
+    status = "DONE" if stopped == "DONE" else "PARTIAL_429"
     if qlog and bad > len(qlog) / 2:
         status = "FAILED_QUERIES"
-    return [_to_item(t) for t in tweets if t.get("id")], {"status": status, "queries": qlog, "rl": rl}
+    return [_to_item(t) for t in db.values() if t.get("id")], {"status": status, "queries": qlog, "rl": rl}
 
 
 def collect(cut_dt, keys=None):
