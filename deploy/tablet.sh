@@ -45,8 +45,8 @@ cat > ~/srca-chrome.sh <<'CHR'
 #!/data/data/com.termux/files/usr/bin/bash
 # متصفح الرصد الخاص (Chromium من Termux، مستقل عن كروم التابلت) — يُشغَّل إذا كان متوقفًا.
 curl -s -m 5 http://127.0.0.1:9222/json/version >/dev/null 2>&1 && exit 0
-pkill -f srca-chrome 2>/dev/null; sleep 2
-nohup chromium-browser --headless=new --no-sandbox --no-zygote --single-process --disable-gpu \
+pkill -f "remote-debugging-port=9222" 2>/dev/null; sleep 2
+setsid nohup chromium-browser --headless=new --no-sandbox --no-zygote --single-process --disable-gpu \
   --remote-debugging-port=9222 --user-data-dir=$HOME/.srca-chrome about:blank > ~/srca-chrome.log 2>&1 &
 for i in $(seq 1 20); do sleep 2; curl -s -m 3 http://127.0.0.1:9222/json/version >/dev/null 2>&1 && exit 0; done
 exit 1
@@ -86,13 +86,14 @@ cat > ~/.termux/boot/srca-boot.sh <<'BOOT'
 #!/data/data/com.termux/files/usr/bin/bash
 termux-wake-lock 2>/dev/null
 sleep 60
-nohup ~/srca-loop.sh >/dev/null 2>&1 &
+setsid nohup ~/srca-loop.sh >/dev/null 2>&1 < /dev/null &
 BOOT
 chmod +x ~/.termux/boot/srca-boot.sh
 termux-wake-lock 2>/dev/null || true
-pgrep -f srca-loop.sh >/dev/null || nohup ~/srca-loop.sh >/dev/null 2>&1 &
+pgrep -f srca-loop.sh >/dev/null || setsid nohup ~/srca-loop.sh >/dev/null 2>&1 < /dev/null &
+sleep 2; pgrep -f srca-loop.sh >/dev/null && echo "✔ الجدولة شغّالة" || echo "!! الجدولة ما اشتغلت"
 
-~/srca-chrome.sh || echo "!! متصفح الرصد ما اشتغل"
+~/srca-chrome.sh && echo "✔ متصفح الرصد شغّال" || echo "!! متصفح الرصد ما اشتغل"
 say "تجربة (3-5 دقائق) — يوصلك إشعار هادئ على Pushover"
 IN "cd /root/srca-monitor && TZ=Asia/Riyadh .venv/bin/python -m srca.main test" || true
 echo
