@@ -1,13 +1,9 @@
 # التشغيل الأساسي على GitHub (مجاني للمستودع العام): الرصد كل 30 دقيقة + الملخصات.
 # المفاتيح في: Settings > Secrets and variables > Actions — لا تُكتب في الكود أبدًا.
 # قاعدة البيانات تُحفظ بين التشغيلات في ذاكرة GitHub المؤقتة (cache) + نسخة في الجدول.
+# (يدوي فقط: الأساسي صار التابلت، وbackup.yml يستلم إذا غاب)
 name: srca-main
 on:
-  schedule:
-    - cron: "5,35 * * * *"   # الرصد كل 30 دقيقة
-    - cron: "0 5 * * *"      # الملخص اليومي 8:00 صباحًا بتوقيت الرياض
-    - cron: "10 5 * * 0"     # الأسبوعي: الأحد
-    - cron: "20 5 1 * *"     # الشهري: أول الشهر
   workflow_dispatch:
     inputs:
       cmd: { description: "run | daily | weekly | monthly | test", default: "run" }
