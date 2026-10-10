@@ -34,10 +34,29 @@ def _run_with(token, cut_unix, keys=None):
     with chrome(_cookies(token)) as ctx:
         pg = ctx.new_page()
         pg.goto("https://x.com/home", wait_until="domcontentloaded", timeout=60000)
-        time.sleep(6)
+        # ننتظر استقرار الصفحة: X أحيانًا يحوّل بعد التحميل (تسجيل دخول/تحقق من جهاز جديد)
+        last, stable = pg.url, 0
+        for _ in range(20):
+            time.sleep(1.5)
+            stable = stable + 1 if pg.url == last else 0
+            last = pg.url
+            if stable >= 4:
+                break
         if "/home" not in pg.url:
-            raise SourceDown("LOGIN_REQUIRED " + pg.url)
-        pg.evaluate(JS)
+            raise SourceDown("LOGIN_REQUIRED " + pg.url.split("?")[0])
+        for attempt in range(3):
+            try:
+                pg.evaluate(JS)
+                break
+            except Exception as e:
+                if "context was destroyed" not in str(e) and "navigation" not in str(e).lower():
+                    raise
+                pg.wait_for_load_state("domcontentloaded", timeout=30000)
+                time.sleep(4)
+                if "/home" not in pg.url:
+                    raise SourceDown("LOGIN_REQUIRED " + pg.url.split("?")[0])
+        else:
+            raise SourceDown("X_PAGE_UNSTABLE " + pg.url.split("?")[0])
         opts = {"pagesCap": config.X_PAGES_CAP}
         if keys:
             opts["keys"] = keys
