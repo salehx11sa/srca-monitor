@@ -47,6 +47,8 @@ cat > ~/srca-chrome.sh <<'CHR'
 curl -s -m 5 http://127.0.0.1:9222/json/version >/dev/null 2>&1 && exit 0
 pkill -f "remote-debugging-port=9222" 2>/dev/null; sleep 2
 setsid nohup chromium-browser --headless=new --no-sandbox --no-zygote --single-process --disable-gpu \
+  --lang=ar-SA --window-size=1280,900 --disable-blink-features=AutomationControlled \
+  --user-agent="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36" \
   --remote-debugging-port=9222 --user-data-dir=$HOME/.srca-chrome about:blank > ~/srca-chrome.log 2>&1 &
 for i in $(seq 1 20); do sleep 2; curl -s -m 3 http://127.0.0.1:9222/json/version >/dev/null 2>&1 && exit 0; done
 exit 1
@@ -93,6 +95,7 @@ termux-wake-lock 2>/dev/null || true
 pgrep -f srca-loop.sh >/dev/null || setsid nohup ~/srca-loop.sh >/dev/null 2>&1 < /dev/null &
 sleep 2; pgrep -f srca-loop.sh >/dev/null && echo "✔ الجدولة شغّالة" || echo "!! الجدولة ما اشتغلت"
 
+pkill -f "remote-debugging-port=9222" 2>/dev/null; sleep 2
 ~/srca-chrome.sh && echo "✔ متصفح الرصد شغّال" || echo "!! متصفح الرصد ما اشتغل"
 say "تجربة (3-5 دقائق) — يوصلك إشعار هادئ على Pushover"
 IN "cd /root/srca-monitor && TZ=Asia/Riyadh .venv/bin/python -m srca.main test" || true
