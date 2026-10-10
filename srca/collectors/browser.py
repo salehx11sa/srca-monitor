@@ -17,15 +17,21 @@ def chrome(cookies=None):
     with sync_playwright() as p:
         cdp = os.environ.get("CHROME_CDP", "").strip()
         if cdp:
+            # متصفح شغّال مسبقًا (وضع العملية الواحدة لا يدعم نوافذ خاصة جديدة، فنستخدم نافذته الأساسية)
             b = p.chromium.connect_over_cdp(cdp, timeout=60000)
-            ctx = b.new_context(user_agent=UA, locale="ar-SA", timezone_id="Asia/Riyadh",
-                                viewport={"width": 1280, "height": 900})
+            ctx = b.contexts[0] if b.contexts else b.new_context()
+            before = set(ctx.pages)
             if cookies:
                 ctx.add_cookies(cookies)
             try:
                 yield ctx
             finally:
-                ctx.close()  # نغلق نافذتنا فقط ونترك المتصفح شغّالًا
+                for pg in ctx.pages:
+                    if pg not in before:
+                        try:
+                            pg.close()
+                        except Exception:
+                            pass
             return
         exe = os.environ.get("CHROME_PATH") or (glob.glob("/opt/pw-browsers/chromium-*/chrome-linux*/chrome") or [None])[0]
         kw = {"executable_path": exe} if exe else {}
