@@ -40,7 +40,10 @@ grep -q '^SRCA_RUNNER=' .env || echo SRCA_RUNNER=server >> .env
 sed -i '/^CHROME_PATH=/d' .env; grep -q '^CHROME_CDP=' .env || echo CHROME_CDP=http://127.0.0.1:9222 >> .env"
 
 say "5/5 الجدولة"
-pkill -f srca-loop.sh 2>/dev/null || true
+set +e   # من هنا: لا نتوقف عند أول خطأ، نكمل ونطبع الحالة
+pkill -9 -f "srca-loop.sh" 2>/dev/null
+for i in 1 2 3 4 5; do pgrep -f "srca-loop.sh" >/dev/null || break; sleep 1; done
+rm -f ~/.srca-loop.lock
 cat > ~/srca-chrome.sh <<'CHR'
 #!/data/data/com.termux/files/usr/bin/bash
 # متصفح الرصد الخاص (Chromium من Termux، مستقل عن كروم التابلت) — يُشغَّل إذا كان متوقفًا.
@@ -88,12 +91,13 @@ cat > ~/.termux/boot/srca-boot.sh <<'BOOT'
 #!/data/data/com.termux/files/usr/bin/bash
 termux-wake-lock 2>/dev/null
 sleep 60
-setsid nohup ~/srca-loop.sh >/dev/null 2>&1 < /dev/null &
+nohup bash ~/srca-loop.sh > ~/srca-loop.out 2>&1 < /dev/null &
 BOOT
 chmod +x ~/.termux/boot/srca-boot.sh
 termux-wake-lock 2>/dev/null || true
-pgrep -f srca-loop.sh >/dev/null || setsid nohup ~/srca-loop.sh >/dev/null 2>&1 < /dev/null &
-sleep 2; pgrep -f srca-loop.sh >/dev/null && echo "✔ الجدولة شغّالة" || echo "!! الجدولة ما اشتغلت"
+nohup bash ~/srca-loop.sh > ~/srca-loop.out 2>&1 < /dev/null &
+disown 2>/dev/null
+sleep 3; pgrep -f srca-loop.sh >/dev/null && echo "✔ الجدولة شغّالة" || { echo "!! الجدولة ما اشتغلت:"; tail -n 5 ~/srca-loop.out; }
 
 pkill -f "remote-debugging-port=9222" 2>/dev/null; sleep 2
 ~/srca-chrome.sh && echo "✔ متصفح الرصد شغّال" || echo "!! متصفح الرصد ما اشتغل"
