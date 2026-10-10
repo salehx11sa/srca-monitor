@@ -6,6 +6,7 @@ from .. import config
 from ..util import item, log, parse_dt
 from .browser import chrome
 
+BUDGET = 12 * 60  # أقصى وقت لجمع X في التشغيلة الواحدة (ثانية)
 JS = (Path(__file__).parent / "x_collector.js").read_text(encoding="utf-8")
 
 
@@ -47,6 +48,11 @@ def _search(pg, raw):
     except Exception as e:
         if "/search" not in pg.url:
             raise SourceDown("LOGIN_REQUIRED " + pg.url.split("?")[0])
+        try:
+            body = pg.evaluate("document.body.innerText.slice(0,160).replace(/\\s+/g,' ')")
+        except Exception:
+            body = ""
+        log.warning("X: لا رد بحث (%s) — %s | %s", str(e)[:60], pg.url.split("?")[0], body)
         return "TIMEOUT", None, None, None
 
 
@@ -62,8 +68,12 @@ def _run_with(token, cut_unix, keys=None):
             raise SourceDown("LOGIN_REQUIRED " + pg.url.split("?")[0])
         qs = pg.evaluate("SRCA.QS")
         queue = [{"k": k, "until": None, "pages": 0, "got": 0, "tries": 0} for k in (keys or list(qs))]
-        waited = 0
+        waited, t0 = 0, time.time()
         while queue:
+            if time.time() - t0 > BUDGET:
+                log.warning("X: انتهت الميزانية الزمنية، متبقي %s استعلام", len(queue))
+                stopped = "BUDGET"
+                break
             it = queue[0]
             raw = qs[it["k"]] + f" since_time:{cut_unix}" + (f" until_time:{it['until']}" if it["until"] else "")
             status, j, rs, rem = _search(pg, raw)
@@ -71,7 +81,7 @@ def _run_with(token, cut_unix, keys=None):
                 rl = f"{rem}/{rs}"
             if status == 429:
                 wait = int(rs or 0) - time.time() + 5
-                if wait > 720 or waited >= 2:
+                if wait > 300 or waited >= 1:
                     stopped, reset = "429", rs
                     break
                 waited += 1
@@ -79,6 +89,11 @@ def _run_with(token, cut_unix, keys=None):
                 time.sleep(max(wait, 30))
                 continue
             if status != 200 or not j:
+                if status == "TIMEOUT" and not db and it["tries"] >= 1 and len(qlog) == 0:
+                    raise SourceDown("NO_SEARCH_RESPONSE " + pg.url.split("?")[0])
+                if time.time() - t0 > BUDGET:
+                    stopped = "BUDGET"
+                    break
                 it["tries"] += 1
                 if it["tries"] >= 3:
                     qlog.append({"k": it["k"], "status": "TIMEOUT" if status == "TIMEOUT" else f"HTTP{status}", "pages": it["pages"]})
@@ -104,7 +119,7 @@ def _run_with(token, cut_unix, keys=None):
             else:
                 it["until"] = oldest
     bad = sum(1 for x in qlog if str(x.get("status", "")).startswith(("TIMEOUT", "HTTP")))
-    status = "DONE" if stopped == "DONE" else "PARTIAL_429"
+    status = "DONE" if stopped == "DONE" else ("PARTIAL_429" if stopped == "429" else "PARTIAL_TIME")
     if qlog and bad > len(qlog) / 2:
         status = "FAILED_QUERIES"
     return [_to_item(t) for t in db.values() if t.get("id")], {"status": status, "queries": qlog, "rl": rl}
