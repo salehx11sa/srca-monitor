@@ -1,7 +1,8 @@
-# (معطّل مؤقتًا — التشغيل الأساسي صار في main.yml)
 # التشغيل الاحتياطي: كل ساعة يتأكد أن السيرفر يعمل؛ إذا غاب أكثر من 75 دقيقة يشغّل الرصد من هنا.
 name: srca-backup
 on:
+  schedule:
+    - cron: "17 * * * *"
   workflow_dispatch: {}
 concurrency: { group: srca-backup, cancel-in-progress: false }
 jobs:
