@@ -62,7 +62,13 @@ def _run_with(token, cut_unix, keys=None):
             opts["keys"] = keys
         res = None
         for attempt in range(3):
-            res = pg.evaluate("([c,o])=>SRCA.run(c,o)", [cut_unix, opts])
+            try:
+                res = pg.evaluate("([c,o])=>SRCA.run(c,o)", [cut_unix, opts])
+            except Exception as e:
+                if "context was destroyed" in str(e):
+                    time.sleep(3)
+                    raise SourceDown("X_REDIRECTED " + pg.url.split("?")[0])
+                raise
             if res.get("stopped") != "429":
                 break
             wait = int(res.get("reset") or 0) - time.time() + 5
