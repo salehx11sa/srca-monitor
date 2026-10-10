@@ -1,0 +1,65 @@
+# التشغيل الأساسي على GitHub (مجاني للمستودع العام): الرصد كل 30 دقيقة + الملخصات.
+# المفاتيح في: Settings > Secrets and variables > Actions — لا تُكتب في الكود أبدًا.
+# قاعدة البيانات تُحفظ بين التشغيلات في ذاكرة GitHub المؤقتة (cache) + نسخة في الجدول.
+name: srca-main
+on:
+  schedule:
+    - cron: "5,35 * * * *"   # الرصد كل 30 دقيقة
+    - cron: "0 5 * * *"      # الملخص اليومي 8:00 صباحًا بتوقيت الرياض
+    - cron: "10 5 * * 0"     # الأسبوعي: الأحد
+    - cron: "20 5 1 * *"     # الشهري: أول الشهر
+  workflow_dispatch:
+    inputs:
+      cmd: { description: "run | daily | weekly | monthly | test", default: "run" }
+concurrency: { group: srca-main, cancel-in-progress: false }
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      SRCA_RUNNER: server
+      SRCA_DATA: ${{ github.workspace }}/data
+      TZ: Asia/Riyadh
+      X_AUTH_TOKEN: ${{ secrets.X_AUTH_TOKEN }}
+      X_CT0: ${{ secrets.X_CT0 }}
+      X_AUTH_TOKEN_2: ${{ secrets.X_AUTH_TOKEN_2 }}
+      TIKTOK_COOKIES: ${{ secrets.TIKTOK_COOKIES }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      PUSHOVER_TOKEN: ${{ secrets.PUSHOVER_TOKEN }}
+      PUSHOVER_USER: ${{ secrets.PUSHOVER_USER }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      SHEET_WEBAPP_URL: ${{ secrets.SHEET_WEBAPP_URL }}
+      SHEET_SECRET: ${{ secrets.SHEET_SECRET }}
+      HEALTHCHECK_URL: ${{ secrets.HEALTHCHECK_URL }}
+      BRAVE_API_KEY: ${{ secrets.BRAVE_API_KEY }}
+      YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: pick
+        run: |
+          case "${{ github.event.schedule }}" in
+            "0 5 * * *") c=daily ;;
+            "10 5 * * 0") c=weekly ;;
+            "20 5 1 * *") c=monthly ;;
+            "") c="${{ github.event.inputs.cmd || 'run' }}" ;;
+            *) c=run ;;
+          esac
+          echo "cmd=$c" >> $GITHUB_OUTPUT
+      - uses: actions/cache/restore@v4
+        with:
+          path: data
+          key: srca-db-${{ github.run_id }}
+          restore-keys: srca-db-
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip }
+      - run: pip install -q -r requirements.txt
+      - if: steps.pick.outputs.cmd == 'run' || steps.pick.outputs.cmd == 'test'
+        run: python -m playwright install --with-deps chromium
+      - run: python -m srca.main ${{ steps.pick.outputs.cmd }}
+      - if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: data
+          key: srca-db-${{ github.run_id }}-${{ github.run_attempt }}
