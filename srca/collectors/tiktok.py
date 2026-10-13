@@ -36,12 +36,21 @@ def _parse(j, q):
     return out
 
 
+_HEAVY = {"media", "image", "font"}
+
+
 def primary(cut_dt):
     if not config.TIKTOK_COOKIES:
         raise SourceDown("NO_ACCOUNT")
-    out, captured = [], []
+    out, captured, errors = [], [], []
     with chrome(_cookies()) as c:
         p = c.new_page()
+        # التابلت يشغّل المتصفح بعملية واحدة؛ فيديوهات تيك توك الثقيلة تُسقطه.
+        # نحتاج فقط ردود البحث (JSON)، فنمنع الفيديو والصور والخطوط.
+        try:
+            p.route("**/*", lambda route: route.abort() if route.request.resource_type in _HEAVY else route.continue_())
+        except Exception as e:
+            log.warning("تيك توك: تعذر منع الوسائط: %s", e)
 
         def on(r):
             if "/api/search/" in r.url and ("item" in r.url or "general" in r.url):
@@ -52,15 +61,27 @@ def primary(cut_dt):
         p.on("response", on)
         for q in config.TIKTOK_TERMS:
             captured.clear()
-            p.goto("https://www.tiktok.com/search/video?q=" + urllib.parse.quote(q), timeout=60000)
-            time.sleep(8)
-            for j in captured:
+            try:
+                p.goto("https://www.tiktok.com/search/video?q=" + urllib.parse.quote(q), timeout=60000,
+                       wait_until="domcontentloaded")
+                time.sleep(8)
+            except Exception as e:
+                errors.append(f"{type(e).__name__}: {str(e)[:120]}")
+                log.warning("تيك توك «%s»: %s", q, errors[-1])
+            for j in list(captured):
                 out += _parse(j, q)
+            if errors and "closed" in errors[-1].lower():
+                break  # المتصفح سقط؛ نكتفي بما جُمع ويُعاد تشغيله في الدورة القادمة
             time.sleep(3)
-        if not out and "login" in p.url:
-            raise SourceDown("LOGIN_REQUIRED")
+        try:
+            if not out and "login" in p.url:
+                raise SourceDown("LOGIN_REQUIRED")
+        except SourceDown:
+            raise
+        except Exception:
+            pass
     if not out:
-        raise SourceDown("NO_RESULTS_CAPTURED")
+        raise SourceDown("NO_RESULTS_CAPTURED" + (" | " + errors[-1] if errors else ""))
     return [i for i in out if parse_dt(i["created"]) >= cut_dt]
 
 
