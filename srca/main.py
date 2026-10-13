@@ -94,10 +94,10 @@ def _feedback():
 
 
 def alerts():
-    """يبني التنبيهات من غير المُنبَّه عنه: العاجل منفرد بصفارة، والباقي رسالة مجمّعة واحدة."""
+    """يبني التنبيهات من غير المُنبَّه عنه: العاجل منفرد بصفارة، والمهم منفرد بأولوية عالية، والباقي رسالة مجمّعة واحدة."""
     rows = store.rows("alerted=0 AND relevance IN ('مؤكد','محتمل') AND created >= ?", (store.since(48),), order="created")
     done_clusters = {r["cluster"] for r in store.rows("alerted=1 AND created >= ?", (store.since(72),)) if r["cluster"]}
-    urgent, normal, mark = [], [], []
+    urgent, important, normal, mark = [], [], [], []
     for r in rows:
         mark.append(r["id"])
         if r["cluster"] in done_clusters:
@@ -105,19 +105,28 @@ def alerts():
         done_clusters.add(r["cluster"])
         if r["priority"] == "عاجل":
             urgent.append(r)
-        elif r["relevance"] == "مؤكد" or r["priority"] == "مهم":
+        elif r["priority"] == "مهم":
+            important.append(r)
+        elif r["relevance"] == "مؤكد":
             normal.append(r)
     dash = sheet.dashboard_url() or None
     for r in urgent:
-        notify.send("عاجل — رصد الهلال", notify.line(r), notify.URGENT, r["url"], "افتح المنشور")
+        notify.send("🔴 عاجل — رصد الهلال", notify.line(r), notify.URGENT, r["url"], "افتح المنشور")
+    for r in important[:8]:
+        notify.send("🟠 مهم — رصد الهلال", notify.line(r), notify.IMPORTANT, r["url"], "افتح المنشور")
+    if len(important) > 8:  # حماية من سيل إشعارات: الزائد يُجمع في رسالة مهمة واحدة
+        body = "\n\n".join(notify.line(r) for r in important[8:14])
+        if len(important) > 14:
+            body += f"\n\nو{len(important) - 14} غيرها في اللوحة."
+        notify.send(f"🟠 مهم — {len(important) - 8} أخرى", body, notify.IMPORTANT, dash, "افتح اللوحة")
     if normal:
         body = "\n\n".join(notify.line(r) for r in normal[:6])
         if len(normal) > 6:
             body += f"\n\nو{len(normal) - 6} غيرها في اللوحة."
-        notify.send(f"رصد الهلال — {len(normal)} جديد", body, notify.NORMAL, dash, "افتح اللوحة")
+        notify.send(f"رصد الهلال — {len(normal)} اعتيادي", body, notify.NORMAL, dash, "افتح اللوحة")
     for i in mark:
         store.update_item(i, alerted=1, alerted_at=iso(now()))
-    return len(urgent), len(normal)
+    return len(urgent) + len(important), len(normal)
 
 
 def run():

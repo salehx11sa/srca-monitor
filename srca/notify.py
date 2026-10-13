@@ -4,7 +4,8 @@ import html as _h
 from . import config, sheet, store
 from .util import post, log
 
-URGENT, NORMAL, QUIET = 1, 0, -1
+# عاجل = أولوية 1 بصفارة، مهم = أولوية 1 بالصوت العادي (منفرد)، اعتيادي = 0، هادئ = -1
+URGENT, IMPORTANT, NORMAL, QUIET = 2, 1, 0, -1
 
 
 def _pushover(title, msg, pri, url=None, url_title=None):
