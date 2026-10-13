@@ -55,7 +55,7 @@ EXPERIENCE_TERMS = ['الإسعاف السعودية تجربتي', 'شكرا ا
 TIKTOK_TERMS = ["الهلال الأحمر السعودي", "هيئة الهلال الأحمر", "الاسعاف السعودي", "مسعف الهلال الأحمر"]
 
 # قنوات تيليجرام عامة (إخبارية) تُفحص بحثًا عن ذكر الهيئة — أضف ما تشاء
-TELEGRAM_CHANNELS = [c for c in E("TELEGRAM_CHANNELS", "SaudiNews50,AlArabiya,SPA_News").split(",") if c]
+TELEGRAM_CHANNELS = [c for c in E("TELEGRAM_CHANNELS", "SaudiNews50,SPA_News,News_Ejazah,mediasrca,awamir_11,wadhefadotcom").split(",") if c]
 
 # تطبيقات الهيئة في المتاجر
 PLAY_APPS = [a for a in E("PLAY_APPS", "sahab.srca.firstresponder,com.srca.myservices").split(",") if a]
