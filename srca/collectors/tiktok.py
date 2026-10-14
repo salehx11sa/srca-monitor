@@ -1,6 +1,6 @@
 """تيك توك عبر خدمة Apify (بدون متصفح على التابلت)؛ بديله بحث الويب site:tiktok.com.
-كل دورة (30 دقيقة) تبحث كلمة واحدة بالتناوب وتجيب أحدث 10 فيديوهات، فكل كلمة تُفحص كل ساعتين.
-التكلفة: ~0.0003$ للفيديو ⇒ أقصاها ~4.3$ شهريًا داخل الرصيد المجاني (5$)، مع حارس يوقفه قبل نفاد الرصيد."""
+كل دورة (30 دقيقة) تبحث كل الكلمات، وتجيب لكل كلمة أحدث 2–3 فيديوهات (config.TIKTOK_COUNTS).
+التكلفة: ~0.0003$ للفيديو × 9 × 48 دورة ⇒ ~3.9$ شهريًا داخل الرصيد المجاني (5$)، مع حارس يوقفه قبل نفاد الرصيد."""
 import re
 from datetime import timedelta
 
@@ -66,17 +66,9 @@ def _to_item(v, q):
     return item("tiktok", vid, url, text, created, author, name, query=q, metrics=m)
 
 
-def primary(cut_dt):
-    if not config.APIFY_TOKEN:
-        raise SourceDown("NO_KEY")
-    if not _budget_ok():
-        raise SourceDown("BUDGET رصيد Apify الشهري قارب النفاد")
-    terms = config.TIKTOK_TERMS
-    i = int(store.kv_get("tiktok_term_i", 0) or 0)
-    q = terms[i % len(terms)]
-    store.kv_set("tiktok_term_i", (i + 1) % len(terms))
-    body = {"keywords": [q], "maxItems": 10, "sortType": "DATE_POSTED", "includeSearchKeywords": True, "location": "SA"}
-    r = post(f"{API}/acts/{ACTOR}/run-sync-get-dataset-items", params={"timeout": 240, "maxTotalChargeUsd": 0.006},
+def _search(q, n):
+    body = {"keywords": [q], "maxItems": n, "sortType": "DATE_POSTED", "includeSearchKeywords": True, "location": "SA"}
+    r = post(f"{API}/acts/{ACTOR}/run-sync-get-dataset-items", params={"timeout": 240, "maxTotalChargeUsd": 0.003},
              json=body, headers=_h(), retries=1, timeout=280)
     if r.status_code == 401:
         raise SourceDown("NO_KEY bad token")
@@ -85,16 +77,37 @@ def primary(cut_dt):
     data = r.json()
     if not isinstance(data, list):
         raise SourceDown("BAD_RESPONSE")
+    return data
+
+
+def primary(cut_dt):
+    if not config.APIFY_TOKEN:
+        raise SourceDown("NO_KEY")
+    if not _budget_ok():
+        raise SourceDown("BUDGET رصيد Apify الشهري قارب النفاد")
     oldest_ok = now() - timedelta(hours=KEEP_HOURS)
-    out = []
-    for v in data:
-        if not isinstance(v, dict) or v.get("errorCode") or v.get("error"):
+    out, done, errs = [], [], []
+    for q in config.TIKTOK_TERMS:
+        try:
+            data = _search(q, config.TIKTOK_COUNTS.get(q, 2))
+        except SourceDown as e:
+            if "NO_KEY" in str(e):
+                raise
+            errs.append(f"{q}: {e}")
             continue
-        it = _to_item(v, q)
-        if it and parse_dt(it["created"]) >= oldest_ok:
-            out.append(it)
-    log.info("تيك توك «%s»: %s فيديو (%s ضمن آخر %s ساعة)", q, len(data), len(out), KEEP_HOURS)
-    return out, {"status": f"apify:{q}:{len(data)}"}
+        n = 0
+        for v in data:
+            if not isinstance(v, dict) or v.get("errorCode") or v.get("error"):
+                continue
+            it = _to_item(v, q)
+            if it and parse_dt(it["created"]) >= oldest_ok:
+                out.append(it)
+                n += 1
+        done.append(f"{q}:{len(data)}/{n}")
+    if not done:
+        raise SourceDown("ALL_FAILED " + " | ".join(errs)[:200])
+    log.info("تيك توك: %s%s", "، ".join(done), (" | أخطاء: " + "، ".join(errs)) if errs else "")
+    return out, {"status": "apify " + " ".join(done)}
 
 
 def fallback(cut_dt):
