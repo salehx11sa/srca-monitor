@@ -46,8 +46,7 @@ for i in 1 2 3 4 5; do pgrep -f "srca-loop.sh" >/dev/null || break; sleep 1; don
 rm -f ~/.srca-loop.lock
 cat > ~/srca-chrome.sh <<'CHR'
 #!/data/data/com.termux/files/usr/bin/bash
-# متصفح الرصد الخاص (Chromium من Termux، مستقل عن كروم التابلت) — يُشغَّل إذا كان متوقفًا.
-curl -s -m 5 http://127.0.0.1:9222/json/version >/dev/null 2>&1 && exit 0
+# متصفح الرصد الخاص (Chromium من Termux، مستقل عن كروم التابلت) — يُعاد تشغيله نظيفًا قبل كل فحص (كان يعلّق وهو «يرد»).
 pkill -f "remote-debugging-port=9222" 2>/dev/null; sleep 2
 setsid nohup chromium-browser --headless=new --no-sandbox --no-zygote --single-process --disable-gpu \
   --lang=ar-SA --window-size=1280,900 --disable-blink-features=AutomationControlled \
