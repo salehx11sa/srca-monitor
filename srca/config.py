@@ -28,7 +28,8 @@ RUNNER = E("SRCA_RUNNER", "server")  # server | backup
 X_AUTH_TOKEN = E("X_AUTH_TOKEN")
 X_CT0 = E("X_CT0")
 X_AUTH_TOKEN_2 = E("X_AUTH_TOKEN_2")          # حساب X الاحتياطي (لاحقًا)
-TIKTOK_COOKIES = E("TIKTOK_COOKIES")          # sessionid=...; (اختياري)
+TIKTOK_COOKIES = E("TIKTOK_COOKIES")          # لم يعد مستخدمًا (تيك توك صار عبر Apify)
+APIFY_TOKEN = E("APIFY_TOKEN")                # تيك توك عبر Apify (الخطة المجانية 5$ شهريًا)
 GEMINI_KEY = E("GEMINI_API_KEY")
 GEMINI_MODELS = [m for m in E("GEMINI_MODELS", "gemini-flash-latest,gemini-3.8-flash,gemini-3.5-flash,gemini-flash-lite-latest").split(",") if m]
 GROQ_KEY = E("GROQ_API_KEY")
@@ -52,7 +53,8 @@ SOURCES = [s for s in E("SRCA_SOURCES", "x,tiktok,news,youtube,telegram,apps,red
 # --- كلمات البحث العامة للمصادر غير X ---
 CORE_TERMS = ['"الهلال الأحمر السعودي"', '"هيئة الهلال الأحمر"', '"Saudi Red Crescent"']
 EXPERIENCE_TERMS = ['الإسعاف السعودية تجربتي', 'شكرا الهلال الأحمر', 'الهلال الأحمر تأخر الإسعاف']
-TIKTOK_TERMS = ["الهلال الأحمر السعودي", "هيئة الهلال الأحمر", "الاسعاف السعودي", "مسعف الهلال الأحمر"]
+# تيك توك: بالشكل اللي يكتبه الناس (بدون همزة)؛ كلمة واحدة كل دورة بالتناوب
+TIKTOK_TERMS = ["الهلال الاحمر السعودي", "اسعاف الهلال الاحمر", "مسعف الهلال الاحمر", "تطوع الهلال الاحمر"]
 
 # قنوات تيليجرام عامة (إخبارية) تُفحص بحثًا عن ذكر الهيئة — أضف ما تشاء
 TELEGRAM_CHANNELS = [c for c in E("TELEGRAM_CHANNELS", "SaudiNews50,SPA_News,News_Ejazah,mediasrca,awamir_11,wadhefadotcom").split(",") if c]
