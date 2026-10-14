@@ -1,88 +1,100 @@
-"""تيك توك: بحث بحساب الرصد (كوكيز) والتقاط ردود البحث؛ بديله بحث الويب site:tiktok.com."""
-import time, urllib.parse
+"""تيك توك عبر خدمة Apify (بدون متصفح على التابلت)؛ بديله بحث الويب site:tiktok.com.
+كل دورة (30 دقيقة) تبحث كلمة واحدة بالتناوب وتجيب أحدث 10 فيديوهات، فكل كلمة تُفحص كل ساعتين.
+التكلفة: ~0.0003$ للفيديو ⇒ أقصاها ~4.3$ شهريًا داخل الرصيد المجاني (5$)، مع حارس يوقفه قبل نفاد الرصيد."""
+import re
+from datetime import timedelta
 
-from .. import config
-from ..util import item, parse_dt, log
-from .browser import chrome
+from .. import config, store
+from ..util import get, item, log, now, parse_dt, post
 from . import websearch
+
+ACTOR = "xmolodtsov~tiktok-search-scraper"
+API = "https://api.apify.com/v2"
+KEEP_HOURS = 48      # لا نُدخل فيديوهات أقدم من يومين (أول تشغيل لا يغرقك بالقديم)
+BUDGET_MARGIN = 0.30  # يتوقف إذا بقي أقل من 0.30$ من الرصيد الشهري
 
 
 class SourceDown(Exception):
     pass
 
 
-def _cookies():
-    out = []
-    for part in config.TIKTOK_COOKIES.split(";"):
-        if "=" in part:
-            k, v = part.strip().split("=", 1)
-            out.append({"name": k, "value": v, "domain": ".tiktok.com", "path": "/", "secure": True, "sameSite": "Lax"})
-    return out
+def _h():
+    return {"Authorization": "Bearer " + config.APIFY_TOKEN}
 
 
-def _parse(j, q):
-    out = []
-    lst = j.get("item_list") or [d.get("item") for d in j.get("data", []) if isinstance(d, dict) and d.get("item")]
-    for v in lst or []:
-        if not v or not v.get("id"):
-            continue
-        au = v.get("author") or {}
-        st = v.get("stats") or {}
-        uid = au.get("uniqueId", "")
-        out.append(item("tiktok", v["id"], f"https://www.tiktok.com/@{uid}/video/{v['id']}", v.get("desc", ""),
-                        parse_dt(v.get("createTime")), uid, au.get("nickname", ""), query=q,
-                        metrics={"like": st.get("diggCount"), "rep": st.get("commentCount"),
-                                 "rt": st.get("shareCount"), "views": st.get("playCount")}))
-    return out
+def _budget_ok():
+    try:
+        r = get(API + "/users/me/limits", headers=_h(), retries=1, timeout=20)
+        if r.status_code == 401:
+            raise SourceDown("NO_KEY bad token")
+        d = r.json().get("data", {})
+        used = float((d.get("current") or {}).get("monthlyUsageUsd") or 0)
+        cap = float((d.get("limits") or {}).get("maxMonthlyUsageUsd") or 5)
+        store.kv_set("apify_usage", {"used": round(used, 3), "cap": cap})
+        return used < cap - BUDGET_MARGIN
+    except SourceDown:
+        raise
+    except Exception as e:
+        log.warning("تيك توك: تعذر قراءة الرصيد: %s", e)
+        return True
 
 
-_HEAVY = {"media", "image", "font"}
+def _g(d, *path):
+    for p in path:
+        if not isinstance(d, dict):
+            return None
+        d = d.get(p)
+    return d
+
+
+def _to_item(v, q):
+    url = v.get("webVideoUrl") or v.get("postPage") or v.get("url") or ""
+    vid = str(v.get("id") or "")
+    if not vid:
+        m = re.search(r"/video/(\d+)", url)
+        vid = m.group(1) if m else ""
+    if not vid:
+        return None
+    author = (_g(v, "authorMeta", "name") or _g(v, "channel", "username") or _g(v, "author", "uniqueId") or "")
+    name = (_g(v, "authorMeta", "nickName") or _g(v, "channel", "name") or _g(v, "author", "nickname") or "")
+    if not url:
+        url = f"https://www.tiktok.com/@{author}/video/{vid}"
+    created = parse_dt(v.get("createTimeISO") or v.get("uploadedAtFormatted") or v.get("createTime") or v.get("uploadedAt"))
+    text = v.get("text") or v.get("title") or v.get("desc") or ""
+    m = {"like": v.get("diggCount", v.get("likes")), "rep": v.get("commentCount", v.get("comments")),
+         "rt": v.get("shareCount", v.get("shares")), "views": v.get("playCount", v.get("views"))}
+    return item("tiktok", vid, url, text, created, author, name, query=q, metrics=m)
 
 
 def primary(cut_dt):
-    if not config.TIKTOK_COOKIES:
-        raise SourceDown("NO_ACCOUNT")
-    out, captured, errors = [], [], []
-    with chrome(_cookies()) as c:
-        p = c.new_page()
-        # التابلت يشغّل المتصفح بعملية واحدة؛ فيديوهات تيك توك الثقيلة تُسقطه.
-        # نحتاج فقط ردود البحث (JSON)، فنمنع الفيديو والصور والخطوط.
-        try:
-            p.route("**/*", lambda route: route.abort() if route.request.resource_type in _HEAVY else route.continue_())
-        except Exception as e:
-            log.warning("تيك توك: تعذر منع الوسائط: %s", e)
-
-        def on(r):
-            if "/api/search/" in r.url and ("item" in r.url or "general" in r.url):
-                try:
-                    captured.append(r.json())
-                except Exception:
-                    pass
-        p.on("response", on)
-        for q in config.TIKTOK_TERMS:
-            captured.clear()
-            try:
-                p.goto("https://www.tiktok.com/search/video?q=" + urllib.parse.quote(q), timeout=60000,
-                       wait_until="domcontentloaded")
-                time.sleep(8)
-            except Exception as e:
-                errors.append(f"{type(e).__name__}: {str(e)[:120]}")
-                log.warning("تيك توك «%s»: %s", q, errors[-1])
-            for j in list(captured):
-                out += _parse(j, q)
-            if errors and "closed" in errors[-1].lower():
-                break  # المتصفح سقط؛ نكتفي بما جُمع ويُعاد تشغيله في الدورة القادمة
-            time.sleep(3)
-        try:
-            if not out and "login" in p.url:
-                raise SourceDown("LOGIN_REQUIRED")
-        except SourceDown:
-            raise
-        except Exception:
-            pass
-    if not out:
-        raise SourceDown("NO_RESULTS_CAPTURED" + (" | " + errors[-1] if errors else ""))
-    return [i for i in out if parse_dt(i["created"]) >= cut_dt]
+    if not config.APIFY_TOKEN:
+        raise SourceDown("NO_KEY")
+    if not _budget_ok():
+        raise SourceDown("BUDGET رصيد Apify الشهري قارب النفاد")
+    terms = config.TIKTOK_TERMS
+    i = int(store.kv_get("tiktok_term_i", 0) or 0)
+    q = terms[i % len(terms)]
+    store.kv_set("tiktok_term_i", (i + 1) % len(terms))
+    body = {"keywords": [q], "maxItems": 10, "sortType": "DATE_POSTED", "includeSearchKeywords": True, "location": "SA"}
+    r = post(f"{API}/acts/{ACTOR}/run-sync-get-dataset-items", params={"timeout": 240, "maxTotalChargeUsd": 0.006},
+             json=body, headers=_h(), retries=1, timeout=280)
+    if r.status_code == 401:
+        raise SourceDown("NO_KEY bad token")
+    if r.status_code not in (200, 201):
+        raise SourceDown(f"HTTP{r.status_code} {r.text[:120]}")
+    data = r.json()
+    if not isinstance(data, list):
+        raise SourceDown("BAD_RESPONSE")
+    oldest_ok = now() - timedelta(hours=KEEP_HOURS)
+    out = []
+    for v in data:
+        if not isinstance(v, dict) or v.get("errorCode") or v.get("error"):
+            continue
+        it = _to_item(v, q)
+        if it and parse_dt(it["created"]) >= oldest_ok:
+            out.append(it)
+    log.info("تيك توك «%s»: %s فيديو (%s ضمن آخر %s ساعة)", q, len(data), len(out), KEEP_HOURS)
+    return out, {"status": f"apify:{q}:{len(data)}"}
 
 
 def fallback(cut_dt):
