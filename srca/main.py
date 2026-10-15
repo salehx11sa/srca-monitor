@@ -12,7 +12,7 @@ from .util import get, log, now, iso, parse_dt, riyadh
 NAMES = {"x": "X", "tiktok": "تيك توك", "news": "الأخبار", "youtube": "يوتيوب", "telegram": "قنوات تيليجرام",
          "apps": "تقييمات التطبيقات", "reddit": "ريديت", "web": "المنتديات والمواقع", "maps": "خرائط قوقل"}
 # كل كم دقيقة يُفحص كل مصدر (X كل دورة)
-EVERY = {"x": 0, "tiktok": 0, "news": 0, "youtube": 120, "telegram": 60, "apps": 360, "reddit": 180, "web": 180, "maps": 1440}
+EVERY = {"x": 0, "tiktok": 0, "news": 0, "youtube": 120, "telegram": 60, "apps": 360, "reddit": 180, "web": 720, "maps": 1440}
 SOURCES = {
     "x": (x.collect, x.fallback),
     "tiktok": (tiktok.primary, tiktok.fallback),
