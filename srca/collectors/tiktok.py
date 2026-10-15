@@ -107,7 +107,27 @@ def primary(cut_dt):
     if not done:
         raise SourceDown("ALL_FAILED " + " | ".join(errs)[:200])
     log.info("تيك توك: %s%s", "، ".join(done), (" | أخطاء: " + "، ".join(errs)) if errs else "")
-    return out, {"status": "apify " + " ".join(done)}
+    extra = _web_extra()
+    return out + extra, {"status": "apify " + " ".join(done) + (f" +web:{len(extra)}" if extra else "")}
+
+
+def _web_extra():
+    """بحث إضافي عبر Tavily مرتين في اليوم: يلقط فيديوهات فاتت Apify، وكلمات إضافية. أي خطأ هنا لا يوقف تيك توك."""
+    last = store.kv_get("tiktok_web_at")
+    if last and now() - parse_dt(last) < timedelta(hours=config.TIKTOK_WEB_EVERY_H - 0.5):
+        return []
+    if not websearch.available():
+        return []
+    store.kv_set("tiktok_web_at", now().strftime("%Y-%m-%dT%H:%M:%SZ"))
+    try:
+        res = websearch.search([f'site:tiktok.com "{t}"' for t in config.TIKTOK_WEB_TERMS],
+                               platform="tiktok", freshness=websearch.WEEK)
+    except Exception as e:
+        log.warning("تيك توك (بحث الويب): %s", e)
+        return []
+    res = [i for i in res if "/video/" in i["url"]]
+    log.info("تيك توك (بحث الويب): %s فيديو", len(res))
+    return res
 
 
 def fallback(cut_dt):
