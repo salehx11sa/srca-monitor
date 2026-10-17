@@ -1,5 +1,5 @@
 """X: يدخل بكوكيز حساب الرصد، يحقن أداة الجمع، ويرجع المنشورات بالشكل الموحد. قراءة فقط."""
-import time
+import json, time
 from pathlib import Path
 
 from .. import config
@@ -7,6 +7,7 @@ from ..util import item, log, parse_dt
 from .browser import chrome
 
 BUDGET = 12 * 60  # أقصى وقت لجمع X في التشغيلة الواحدة (ثانية)
+PARENT_CAP = 6     # أقصى عدد تغريدات أصلية تُجلب لسياق الردود في التشغيلة الواحدة
 JS = (Path(__file__).parent / "x_collector.js").read_text(encoding="utf-8")
 
 
@@ -28,32 +29,90 @@ def _to_item(t):
     return item("x", t["id"], url, t.get("tx", ""), parse_dt(t.get("t")), t.get("sn", ""), t.get("nm", ""),
                 quoted=t.get("qt", ""), location=t.get("loc", ""), metrics=t.get("m", {}), media=t.get("md", ""),
                 query="".join(t.get("qs", [])), reply_to=t.get("rp", ""), reply_id=t.get("rpId", ""),
-                retweet=t.get("rt", False), verified=t.get("vt", ""), followers=t.get("fo"))
+                retweet=t.get("rt", False), verified=t.get("vt", ""), followers=t.get("fo"),
+                parent_author=(t.get("pp") or {}).get("sn", ""), parent_text=(t.get("pp") or {}).get("tx", ""),
+                root_id=(t.get("pr") or {}).get("id", ""), root_author=(t.get("pr") or {}).get("sn", ""),
+                root_text=(t.get("pr") or {}).get("tx", ""))
 
 
-def _search(pg, raw):
-    """يفتح صفحة البحث (الأحدث) مباشرة ويلتقط رد SearchTimeline. يرجع (status, json, reset)."""
-    from urllib.parse import quote
-    url = "https://x.com/search?q=" + quote(raw) + "&src=typed_query&f=live"
-    try:
-        with pg.expect_response(lambda r: "SearchTimeline" in r.url and r.request.method == "GET", timeout=30000) as info:
-            pg.goto(url, wait_until="domcontentloaded", timeout=60000)
-        r = info.value
-        j = None
-        try:
-            j = r.json()
-        except Exception:
-            pass
-        return r.status, j, r.headers.get("x-rate-limit-reset"), r.headers.get("x-rate-limit-remaining")
+def _parents(pg, db):
+    """سياق الردود: يجلب التغريدة اللي جاء عليها الرد + أصل النقاش (أول تغريدة في السلسلة)،
+    ليصلك تنبيه الرد ومعه «ردًا على» و«أصل النقاش». الأصل الجديد يدخل الرصد كمنشور عادي
+    (فإن كان يخص الهيئة ولم يُنبَّه عنه، يصلك تنبيهه هو أيضًا)."""
+    from .. import store
+    from ..classify import rules
+    want = {}
+    for t in list(db.values()):
+        pid = t.get("rpId")
+        if not pid or pid in want:
+            continue
+        ok, _ = rules.prefilter({"text": t.get("tx", ""), "quoted": t.get("qt", ""), "author": t.get("sn", "")})
+        if ok:
+            want[pid] = t.get("rp", "")
+    if not want:
+        return {}
+    out = {}
+    try:  # المحفوظ سابقًا لا يُجلب مرة ثانية
+        for r in store.rows("id IN (%s)" % ",".join("?" * len(want)), tuple("x:" + p for p in want)):
+            try:
+                ex = json.loads(r.get("extra") or "{}")
+            except Exception:
+                ex = {}
+            root = None
+            if ex.get("root_id"):
+                root = {"id": ex["root_id"], "sn": ex.get("root_author", ""), "tx": ex.get("root_text", "")}
+            out[r["id"][2:]] = {"sn": r["author"], "tx": r["text"], "root": root, "known": True}
     except Exception as e:
-        if "/search" not in pg.url:
-            raise SourceDown("LOGIN_REQUIRED " + pg.url.split("?")[0])
+        log.info("X: تعذر قراءة الأصول المحفوظة: %s", str(e)[:80])
+    fetched = 0
+    for pid, sn in want.items():
+        if pid in out:
+            continue
+        if pid in db and not db[pid].get("rpId"):  # الأصل نفسه موجود في نتائج البحث وهو بداية النقاش
+            out[pid] = db[pid]
+            continue
+        if fetched >= PARENT_CAP:
+            continue
+        fetched += 1
         try:
-            body = pg.evaluate("document.body.innerText.slice(0,160).replace(/\\s+/g,' ')")
-        except Exception:
-            body = ""
-        log.warning("X: لا رد بحث (%s) — %s | %s", str(e)[:60], pg.url.split("?")[0], body)
-        return "TIMEOUT", None, None, None
+            with pg.expect_response(lambda r: "TweetDetail" in r.url and r.request.method == "GET", timeout=25000) as info:
+                pg.goto(f"https://x.com/{sn or 'i'}/status/{pid}", wait_until="domcontentloaded", timeout=45000)
+            tw = pg.evaluate("j => SRCA.parse(j)", info.value.json())
+            focal = next((t for t in tw if t.get("id") == pid), None)
+            if not focal:
+                continue
+            focal["qs"] = ["parent"]
+            if focal.get("rpId"):  # التغريدة نفسها رد ← أصل النقاش هو أول تغريدة بلا «رد على»
+                root = next((t for t in tw if not t.get("rpId") and t.get("id") != pid), None)
+                if root:
+                    root["qs"] = ["parent"]
+                    focal["root"] = root
+            out[pid] = focal
+        except Exception as e:
+            log.info("X: تعذر جلب أصل الرد %s: %s", pid, str(e)[:80])
+    return out
+
+
+def _attach_parents(db, parents):
+    add = []
+    for t in list(db.values()):
+        p = parents.get(t.get("rpId"))
+        if not p:
+            continue
+        t["pp"] = {"sn": p.get("sn", ""), "tx": (p.get("tx") or "")[:500]}
+        root = p.get("root")
+        if root and root.get("id") and root["id"] != t.get("id"):
+            t["pr"] = {"id": root["id"], "sn": root.get("sn", ""), "tx": (root.get("tx") or "")[:500]}
+            if root.get("t"):
+                add.append(root)
+        if not p.get("known") and p.get("id"):
+            add.append(p)
+    for p in add:  # الأصول الجديدة تدخل الرصد كمنشورات عادية
+        if p["id"] not in db:
+            q = {k: v for k, v in p.items() if k not in ("root", "known")}
+            if p.get("root") and p["root"].get("id"):
+                q["pr"] = {"id": p["root"]["id"], "sn": p["root"].get("sn", ""), "tx": (p["root"].get("tx") or "")[:500]}
+            db[p["id"]] = q
 
 
 def _run_with(token, cut_unix, keys=None):
@@ -118,6 +177,11 @@ def _run_with(token, cut_unix, keys=None):
                 queue.pop(0)
             else:
                 it["until"] = oldest
+        if db and stopped != "BUDGET":
+            try:
+                _attach_parents(db, _parents(pg, db))
+            except Exception as e:
+                log.warning("X: تعذر جلب سياق الردود: %s", str(e)[:120])
     bad = sum(1 for x in qlog if str(x.get("status", "")).startswith(("TIMEOUT", "HTTP")))
     status = "DONE" if stopped == "DONE" else ("PARTIAL_429" if stopped == "429" else "PARTIAL_TIME")
     if qlog and bad > len(qlog) / 2:
