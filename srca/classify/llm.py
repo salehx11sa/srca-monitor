@@ -22,7 +22,10 @@ def _prompt(batch, examples):
         extra = it.get("extra") or {}
         ctx = []
         if extra.get("reply_to"):
-            ctx.append(f"رد على @{extra['reply_to']}")
+            ctx.append(f"رد على @{extra['reply_to']}" + (f" — نص التغريدة الأصلية: {extra['parent_text'][:300]}"
+                                                         if extra.get("parent_text") else ""))
+        if extra.get("root_text") and extra.get("root_id") != extra.get("reply_id"):
+            ctx.append(f"أصل النقاش @{extra.get('root_author', '')}: {extra['root_text'][:300]}")
         if it.get("quoted"):
             ctx.append("يقتبس: " + it["quoted"][:300])
         if it.get("location"):
