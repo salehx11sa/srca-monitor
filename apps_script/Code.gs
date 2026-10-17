@@ -30,6 +30,7 @@ function doPost(e) {
     if (d.action === 'append') {
       const sh = ss.getSheetByName(SH_ITEMS);
       if (sh.getLastRow() === 0) { sh.appendRow(d.cols); sh.setFrozenRows(1); }
+      else if (sh.getLastColumn() < d.cols.length) sh.getRange(1, 1, 1, d.cols.length).setValues([d.cols]);
       const have = new Set(sh.getLastRow() > 1 ? sh.getRange(2, 1, sh.getLastRow() - 1, 1).getValues().map(r => String(r[0])) : []);
       const rows = d.rows.filter(r => !have.has(String(r[0])));
       if (rows.length) sh.getRange(sh.getLastRow() + 1, 1, rows.length, rows[0].length).setValues(rows);
@@ -78,7 +79,7 @@ function data(k) {
   if (k !== secret_()) throw new Error('forbidden');
   const ss = SpreadsheetApp.getActiveSpreadsheet(), sh = ss.getSheetByName(SH_ITEMS);
   const n = sh.getLastRow() - 1;
-  const rows = n > 0 ? sh.getRange(Math.max(2, sh.getLastRow() - 799), 1, Math.min(n, 800), 17).getDisplayValues() : [];
+  const rows = n > 0 ? sh.getRange(Math.max(2, sh.getLastRow() - 799), 1, Math.min(n, 800), 18).getDisplayValues() : [];
   const fb = {}; const f = ss.getSheetByName(SH_FB);
   if (f.getLastRow() > 1) f.getRange(2, 1, f.getLastRow() - 1, 2).getValues().forEach(r => fb[r[0]] = r[1]);
   return { rows: rows.reverse(), fb, status: JSON.parse(PropertiesService.getScriptProperties().getProperty('STATUS') || '{}') };
@@ -109,6 +110,8 @@ select,input{font:inherit;padding:6px 10px;border:1px solid var(--line);border-r
 .r1{background:#fbe7e6;color:#a3241e}.r2{background:#fdf3dc;color:#8a6110}.r3{background:#eef0f6;color:#5d6079}
 .ok{background:#ece8f6;color:#513A87}.pv{background:transparent;color:var(--mut);border:1px solid var(--line)}
 .it h3{margin:6px 0 4px;font-size:1rem;font-weight:500}.it .tx{color:var(--mut);font-size:.85rem;max-height:4.6em;overflow:hidden}
+.cx{margin-top:6px;padding:6px 10px;border-inline-start:3px solid var(--gold);background:var(--bg);border-radius:6px;font-size:.8rem;color:var(--mut)}
+.cx a{color:var(--violet)}
 .act{display:flex;gap:6px;margin-top:8px}.act button,.act a{font:inherit;font-size:.8rem;border:1px solid var(--line);background:transparent;color:var(--fg);border-radius:8px;padding:4px 10px;cursor:pointer;text-decoration:none}
 .act button.on{background:var(--navy);color:#fff}.st{font-size:.8rem;color:var(--mut);margin-top:6px}
 @media(max-width:560px){.kpis{grid-template-columns:repeat(2,1fr)}}
@@ -125,13 +128,15 @@ const K='<?= k ?>';let D={rows:[],fb:{}};
 const P={x:'X',tiktok:'تيك توك',news:'الأخبار',youtube:'يوتيوب',telegram:'تيليجرام',app:'تقييم تطبيق',reddit:'ريديت',web:'موقع/منتدى',maps:'خرائط قوقل'};
 function esc(s){return String(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 function draw(){const fr=fr_.value,fp=fp_.value,fs=fs_.value,fpr=fpr_.value,q=q_.value.trim();
- const R=D.rows.filter(r=>(!fr||r[8]==fr)&&(!fp||r[2]==fp)&&(!fs||r[7]==fs)&&(!fpr||r[11]==fpr)&&(!q||(r[5]+r[16]).includes(q)));
+ const R=D.rows.filter(r=>(!fr||r[8]==fr)&&(!fp||r[2]==fp)&&(!fs||r[7]==fs)&&(!fpr||r[11]==fpr)&&(!q||(r[5]+r[16]+(r[17]||'')).includes(q)));
  list.innerHTML=R.slice(0,300).map(r=>{const v=D.fb[r[0]]||'';const pc=r[11]=='عاجل'?'r1':r[11]=='مهم'?'r2':'r3';
  return '<div class="it"><div class="top"><span class="chip '+pc+'">'+esc(r[11]||'—')+'</span><span class="chip '+(r[8]=='مؤكد'?'ok':'pv')+'">'+esc(r[8])+'</span>'
  +'<span>'+esc(P[r[2]]||r[2])+'</span><span>'+esc(r[1])+'</span><span>@'+esc(r[3])+'</span><span>'+esc(r[6])+'</span><span>'+esc(r[7])+'</span></div>'
- +'<h3>'+esc(r[5])+'</h3><div class="tx">'+esc(r[16])+'</div>'
+ +'<h3>'+esc(r[5])+'</h3><div class="tx">'+esc(r[16])+'</div>'+ctx(r[17])
  +'<div class="act"><a href="'+esc(r[4])+'" target="_blank">افتح</a><button class="'+(v=='مهم'?'on':'')+'" onclick="rate(\\''+r[0]+'\\',\\'مهم\\',this)">مهم</button>'
  +'<button class="'+(v=='مستبعد'?'on':'')+'" onclick="rate(\\''+r[0]+'\\',\\'مستبعد\\',this)">مستبعد</button></div></div>'}).join('')||'<p>لا نتائج.</p>';}
+function ctx(c){if(!c)return '';return '<div class="cx">'+String(c).split('\\n').map(l=>{const m=l.match(/^(.*) — (https:\\/\\/\\S+)$/);
+ return m?'<div>'+esc(m[1])+' <a href="'+esc(m[2])+'" target="_blank">افتح</a></div>':'<div>'+esc(l)+'</div>'}).join('')+'</div>'}
 function rate(id,v,b){b.classList.add('on');D.fb[id]=v;google.script.run.withFailureHandler(()=>{b.classList.remove('on')}).rate(K,id,v)}
 const fr_=document.getElementById('fr'),fp_=document.getElementById('fp'),fs_=document.getElementById('fs'),fpr_=document.getElementById('fpr'),q_=document.getElementById('q');
 [fr_,fp_,fs_,fpr_].forEach(e=>e.onchange=draw);q_.oninput=draw;
