@@ -5,7 +5,7 @@ from . import config
 from .util import post, get, log
 
 COLS = ["id", "وقت النشر (الرياض)", "المنصة", "الحساب", "الرابط", "الخلاصة", "النوع", "المشاعر", "الارتباط", "السبب",
-        "المنطقة", "الأولوية", "التفاعل", "المجموعة", "نُبّه؟", "المصنّف", "النص"]
+        "المنطقة", "الأولوية", "التفاعل", "المجموعة", "نُبّه؟", "المصنّف", "النص", "السياق"]
 
 
 def enabled():
@@ -36,7 +36,15 @@ def row(r):
     return [r["id"], riyadh(r["created"]), r["platform"], r["author"], r["url"], r.get("summary") or "", r.get("ctype") or "",
             r.get("sentiment") or "", r.get("relevance") or "", r.get("reason") or "", r.get("region") or "",
             r.get("priority") or "", eng, r.get("cluster") or "", "نعم" if r.get("alerted") else "", r.get("classifier") or "",
-            (r.get("text") or "")[:1500]]
+            (r.get("text") or "")[:1500], _ctx(r)]
+
+
+def _ctx(r):
+    try:
+        from .notify import ctx_plain
+        return ctx_plain(r)
+    except Exception:
+        return ""
 
 
 def append(rows):

@@ -1,5 +1,7 @@
 """التنبيهات: Pushover أساسي ← تيليجرام ← البريد. بلا تكرار أبدًا (لا أولوية 2)."""
 import html as _h
+import json
+import re
 
 from . import config, sheet, store
 from .util import post, log
@@ -8,10 +10,18 @@ from .util import post, log
 URGENT, IMPORTANT, NORMAL, QUIET = 2, 1, 0, -1
 
 
+def _fit(msg, n=1024):
+    """يقص الرسالة الطويلة عند حد منشور كامل (لا يقطع رابطًا في نصفه)."""
+    if len(msg) <= n:
+        return msg
+    cut = msg.rfind("\n\n", 0, n - 40)
+    return (msg[:cut] if cut > 0 else msg[:n - 40].rsplit("<", 1)[0]) + "\n\n…والباقي في اللوحة."
+
+
 def _pushover(title, msg, pri, url=None, url_title=None):
     if not (config.PUSHOVER_TOKEN and config.PUSHOVER_USER):
         raise RuntimeError("NO_PUSHOVER")
-    data = {"token": config.PUSHOVER_TOKEN, "user": config.PUSHOVER_USER, "title": title[:250], "message": msg[:1024],
+    data = {"token": config.PUSHOVER_TOKEN, "user": config.PUSHOVER_USER, "title": title[:250], "message": _fit(msg),
             "priority": max(-1, min(1, pri)), "html": 1}
     if pri == URGENT:
         data["sound"] = "siren"
@@ -69,7 +79,87 @@ def pretty_platform(p):
             "app": "تقييم تطبيق", "reddit": "ريديت", "web": "موقع/منتدى", "maps": "خرائط قوقل", "linkedin": "لينكدإن"}.get(p, p)
 
 
-def line(r):
+def extra(r):
+    ex = r.get("extra") or {}
+    if isinstance(ex, str):
+        try:
+            ex = json.loads(ex)
+        except Exception:
+            ex = {}
+    return ex if isinstance(ex, dict) else {}
+
+
+_MENTIONS = re.compile(r"^(?:\s*@\w+)+\s*")
+
+
+def _snip(native_id, raw, n=90):
+    """نص مختصر للتغريدة الأصلية: ملخص الذكاء إن وُجد (يحذف التفاصيل الحساسة)، وإلا النص بلا المنشنات."""
+    txt = ""
+    try:
+        got = store.rows("id=?", ("x:" + native_id,))
+        if got and got[0].get("summary"):
+            txt = got[0]["summary"]
+    except Exception:
+        pass
+    if not txt:
+        txt = _MENTIONS.sub("", re.sub(r"https?://\S+", "", raw or ""))
+    txt = " ".join(txt.split())
+    return (txt[:n] + "…") if len(txt) > n else txt
+
+
+def context(r):
+    """سطور السياق لأي رد: اللي انكتب عليه الرد، وأصل النقاش إذا كان الرد على رد."""
+    ex, out = extra(r), []
+    if r.get("platform") != "x" or not ex.get("reply_id"):
+        return out
+    who = ex.get("parent_author") or ex.get("reply_to") or ""
+    out.append({"k": "↩︎ ردًا على", "who": who, "url": f"https://x.com/{who or 'i'}/status/{ex['reply_id']}",
+                "txt": _snip(ex["reply_id"], ex.get("parent_text")), "root": False})
+    if ex.get("root_id") and ex["root_id"] != ex["reply_id"]:
+        who = ex.get("root_author") or ""
+        out.append({"k": "🧵 أصل النقاش", "who": who, "url": f"https://x.com/{who or 'i'}/status/{ex['root_id']}",
+                    "txt": _snip(ex["root_id"], ex.get("root_text")), "root": True})
+    return out
+
+
+def ctx_html(c):
+    return f"{c['k']} @{_h.escape(c['who'])}" + (f": {_h.escape(c['txt'])}" if c["txt"] else "") + \
+        f" <a href=\"{_h.escape(c['url'])}\">افتح</a>"
+
+
+def ctx_plain(r):
+    return "\n".join(f"{c['k']} @{c['who']}: {c['txt']} — {c['url']}" for c in context(r))
+
+
+def line(r, ctx=True):
     pr = r.get("priority") or "اعتيادي"
     head = f"<b>{pr}</b> — {r.get('ctype') or ''} — {pretty_platform(r['platform'])}"
-    return f"{head}\n{_h.escape(r.get('summary') or r.get('text', '')[:120])} <a href=\"{_h.escape(r['url'])}\">افتح</a>"
+    out = f"{head}\n{_h.escape(r.get('summary') or r.get('text', '')[:120])} <a href=\"{_h.escape(r['url'])}\">افتح</a>"
+    if ctx:  # الرد يجي ومعه التغريدة الأصلية وأصل النقاش
+        for c in context(r):
+            out += "\n" + ctx_html(c)
+    return out
+
+
+def conv_key(r):
+    """مفتاح النقاش: أصل النقاش للرد، أو المنشور نفسه إذا كان بداية نقاش."""
+    ex = extra(r)
+    if r.get("platform") != "x":
+        return ""
+    return ex.get("root_id") or ex.get("reply_id") or r["id"].split(":", 1)[-1]
+
+
+def group_body(g, key):
+    """رسالة واحدة لعدة منشورات من نفس النقاش: كل منشور بسطره، والسياق مرة واحدة تحت."""
+    has_root = any(r["id"] == "x:" + key for r in g)
+    g = sorted(g, key=lambda r: (r["id"] != "x:" + key, r.get("created") or ""))
+    body = "\n\n".join(line(r, ctx=False) for r in g[:5])
+    if len(g) > 5:
+        body += f"\n\nو{len(g) - 5} غيرها في اللوحة."
+    if not has_root:
+        cs = [c for r in g for c in context(r)]
+        roots = [c for c in cs if c["root"]]
+        pick = roots[:1] or cs[:1]
+        if pick:
+            body += "\n\n" + ctx_html(pick[0])
+    return body

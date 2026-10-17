@@ -110,6 +110,28 @@ def alerts():
         elif r["relevance"] == "مؤكد":
             normal.append(r)
     dash = sheet.dashboard_url() or None
+    # منشورات نفس النقاش (أصل + ردود، أو عدة ردود) في هذا الفحص ← تنبيه واحد بدل عدة تنبيهات
+    convs = {}
+    for r in urgent + important + normal:
+        k = notify.conv_key(r)
+        if k:
+            convs.setdefault(k, []).append(r)
+    convs = {k: g for k, g in convs.items() if len(g) >= 2}
+    grouped = {r["id"] for g in convs.values() for r in g}
+    urgent = [r for r in urgent if r["id"] not in grouped]
+    important = [r for r in important if r["id"] not in grouped]
+    normal = [r for r in normal if r["id"] not in grouped]
+    n_conv_hi = 0
+    for k, g in convs.items():
+        pris = {r["priority"] for r in g}
+        lvl, tag = (notify.URGENT, "🔴 عاجل") if "عاجل" in pris else (notify.IMPORTANT, "🟠 مهم") if "مهم" in pris \
+            else (notify.NORMAL, "رصد الهلال")
+        n_conv_hi += lvl != notify.NORMAL
+        cs = [c for r in g for c in notify.context(r)]
+        ctx = [c for c in cs if c["root"]] or cs
+        who = next((r["author"] for r in g if r["id"] == "x:" + k), None) or (ctx[0]["who"] if ctx else g[0].get("author", ""))
+        url = f"https://x.com/{who or 'i'}/status/{k}"
+        notify.send(f"{tag} — نقاش @{who}: {len(g)} منشورات", notify.group_body(g, k), lvl, url, "افتح أصل النقاش")
     for r in urgent:
         notify.send("🔴 عاجل — رصد الهلال", notify.line(r), notify.URGENT, r["url"], "افتح المنشور")
     for r in important[:8]:
@@ -126,7 +148,7 @@ def alerts():
         notify.send(f"رصد الهلال — {len(normal)} اعتيادي", body, notify.NORMAL, dash, "افتح اللوحة")
     for i in mark:
         store.update_item(i, alerted=1, alerted_at=iso(now()))
-    return len(urgent) + len(important), len(normal)
+    return len(urgent) + len(important) + n_conv_hi, len(normal) + len(convs) - n_conv_hi
 
 
 def run():
