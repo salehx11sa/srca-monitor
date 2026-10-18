@@ -115,6 +115,32 @@ def _attach_parents(db, parents):
             db[p["id"]] = q
 
 
+def _search(pg, raw):
+    """يفتح بحث «الأحدث» ويلتقط رد SearchTimeline: (الحالة، JSON، تجدد الحد، المتبقي)."""
+    from urllib.parse import quote
+    url = "https://x.com/search?q=" + quote(raw) + "&src=typed_query&f=live"
+    try:
+        with pg.expect_response(lambda r: "SearchTimeline" in r.url and r.request.method != "OPTIONS", timeout=45000) as info:
+            pg.goto(url, wait_until="domcontentloaded", timeout=60000)
+        r = info.value
+        h = r.headers
+        rs, rem = h.get("x-rate-limit-reset"), h.get("x-rate-limit-remaining")
+        if r.status != 200:
+            return r.status, None, rs, rem
+        try:
+            return 200, r.json(), rs, rem
+        except Exception:
+            return "BADJSON", None, rs, rem
+    except Exception as e:
+        txt = ""
+        try:
+            txt = pg.inner_text("body", timeout=3000)[:160].replace("\n", " ")
+        except Exception:
+            pass
+        log.warning("X: لا رد بحث (%s) — %s | %s", str(e)[:80], pg.url.split("?")[0], txt)
+        return "TIMEOUT", None, None, None
+
+
 def _run_with(token, cut_unix, keys=None):
     """كل استعلام يُفتح كصفحة مستقلة (أثبت من التنقل الداخلي الذي قد يعيد تحميل الصفحة)."""
     db, qlog, rl, stopped, reset = {}, [], None, "DONE", None
@@ -126,6 +152,7 @@ def _run_with(token, cut_unix, keys=None):
         if "/home" not in pg.url:
             raise SourceDown("LOGIN_REQUIRED " + pg.url.split("?")[0])
         qs = pg.evaluate("SRCA.QS")
+        keys = [k for k in (keys or []) if k in qs] or (list(qs)[:1] if keys else None)
         queue = [{"k": k, "until": None, "pages": 0, "got": 0, "tries": 0} for k in (keys or list(qs))]
         waited, t0 = 0, time.time()
         while queue:
