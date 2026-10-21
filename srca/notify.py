@@ -30,6 +30,17 @@ def _pushover(title, msg, pri, url=None, url_title=None):
     r = post("https://api.pushover.net/1/messages.json", data=data, retries=2)
     if r.status_code != 200:
         raise RuntimeError(f"PUSHOVER HTTP{r.status_code} {r.text[:120]}")
+    if pri == QUIET:  # الرسائل التقنية لصالح وحده
+        return
+    for key in config.PUSHOVER_TEAM:  # الزملاء: فشل أحدهم لا يوقف شيئًا ولا يحوّل القناة
+        if key == config.PUSHOVER_USER:
+            continue
+        try:
+            rt = post("https://api.pushover.net/1/messages.json", data={**data, "user": key}, retries=2)
+            if rt.status_code != 200:
+                log.warning("تعذر تنبيه زميل (%s…): HTTP%s", key[:5], rt.status_code)
+        except Exception as e:
+            log.warning("تعذر تنبيه زميل (%s…): %s", key[:5], str(e)[:80])
 
 
 def _telegram(title, msg, pri, url=None, url_title=None):
