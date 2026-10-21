@@ -37,6 +37,8 @@ GROQ_KEY = E("GROQ_API_KEY")
 GROQ_MODELS = [m for m in E("GROQ_MODELS", "llama-3.3-70b-versatile,openai/gpt-oss-120b").split(",") if m]
 PUSHOVER_TOKEN = E("PUSHOVER_TOKEN")
 PUSHOVER_USER = E("PUSHOVER_USER")
+# زملاء يستلمون التنبيهات والتقارير (رسائل «حالة الرصد» التقنية تبقى لصالح فقط). مفاتيح مفصولة بفاصلة.
+PUSHOVER_TEAM = [k.strip() for k in E("PUSHOVER_TEAM", "up1e5gjskxawb8m8ru4xox6xmoo3gn").split(",") if k.strip()]
 TELEGRAM_BOT = E("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT = E("TELEGRAM_CHAT_ID")
 SHEET_URL = E("SHEET_WEBAPP_URL")             # رابط Apps Script (الجدول + البريد + اللوحة)
