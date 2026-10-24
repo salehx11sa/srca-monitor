@@ -1,13 +1,13 @@
-"""المنسّق: python -m srca.main run|daily|weekly|monthly|test|backup-check
+"""المنسّق: python -m srca.main run|daily|weekly|monthly|test|should-backup|backup-loop
 كل تعقيد التشغيل هنا؛ أنت لا ترى إلا التنبيهات والجدول واللوحة."""
-import sys, traceback
+import sys, time, traceback
 from datetime import timedelta
 
 from . import config, dedupe, notify, reports, sheet, store
 from .classify import llm, rules
 from .collectors import simple, tiktok, x
 from .collectors.websearch import NoBackend
-from .util import get, log, now, iso, parse_dt, riyadh
+from .util import get, log, now, iso, parse_dt, riyadh, RIYADH
 
 NAMES = {"x": "X", "tiktok": "تيك توك", "news": "الأخبار", "youtube": "يوتيوب", "telegram": "قنوات تيليجرام",
          "apps": "تقييمات التطبيقات", "reddit": "ريديت", "web": "المنتديات والمواقع", "maps": "خرائط قوقل"}
@@ -29,6 +29,8 @@ def ping(suffix=""):
 
 
 def _notice(source, mode, detail=""):
+    if config.RUNNER == "backup":
+        return  # الاحتياطي لا يرسل رسالة لكل مصدر؛ يرسل رسالة واحدة مجمّعة عند الاستلام (_takeover_note)
     n = NAMES.get(source, source)
     msg = {"fallback": f"مصدر «{n}» متعطل، والرصد مستمر عن طريق البديل.",
            "down": f"مصدر «{n}» متوقف هو وبديله. بقية المصادر تعمل، وسأبلغك إذا رجع.",
@@ -160,7 +162,7 @@ def run():
         if config.RUNNER == "backup" and sheet.enabled():
             if not _backup_should_run():
                 store.run_end(rid, "skipped", {"reason": "server alive"})
-                return
+                return "skipped"
         fb, blocked = _feedback()
         collected = []
         for name in config.SOURCES:
@@ -207,7 +209,8 @@ def run():
         down = [k for k, v in detail["sources"].items() if v["how"].startswith("down")]
         status = "ok" if len(down) < max(1, len(detail["sources"]) // 2) else "degraded"
         store.run_end(rid, status, detail)
-        _status(start)
+        if _status(start) and config.RUNNER == "backup":
+            _takeover_note(detail)
         ping("" if status == "ok" else "/fail")
         log.info("انتهى الفحص: %s", detail)
     except Exception:
@@ -219,8 +222,9 @@ def run():
         store.kv_set("run_fails", fails)
         if fails == 3:  # رسالة واحدة فقط بعد 3 إخفاقات متتالية
             notify.send("حالة الرصد", "الفحص تعطل 3 مرات متتالية. أحاول تلقائيًا كل دورة، وراجع دليل التشغيل إن استمر.", notify.QUIET)
-        return
+        return "error"
     store.kv_set("run_fails", 0)
+    return "ok"
 
 
 def _sync():
@@ -239,38 +243,104 @@ def _sync():
 
 
 def _status(start):
+    """يكتب حالة الرصد في الجدول. يرجع True إذا كُتبت."""
     if not sheet.enabled():
-        return
+        return False
     try:
-        sheet.status(last_run=iso(start), runner=config.RUNNER,
+        if config.RUNNER == "backup":
+            cur = sheet.get_status()
+            if cur.get("runner") != "backup" and cur.get("last_run") and parse_dt(cur["last_run"]) > start:
+                return False  # التابلت رجع أثناء هذه الدورة: لا نكتب فوق حالته
+            server_last = (store.kv_get("takeover") or {}).get("since", "")
+        else:
+            server_last = iso(start)
+        sheet.status(last_run=iso(start), runner=config.RUNNER, server_last=server_last,
                      sources={r["source"]: r["mode"] for r in store.db().execute("SELECT * FROM source_state")})
+        return True
     except Exception as e:
         log.warning("تعذر تحديث الحالة: %s", e)
+        return False
 
 
 def _backup_should_run():
-    """التشغيل الاحتياطي (GitHub): يعمل فقط إذا غاب السيرفر أكثر من 75 دقيقة."""
+    """التشغيل الاحتياطي (GitHub): يعمل فقط إذا غاب التابلت أكثر من 75 دقيقة."""
     st = sheet.get_status()
     last = parse_dt(st.get("last_run")) if st.get("last_run") else None
     if last and now() - last < timedelta(minutes=75) and st.get("runner") != "backup":
         return False
     if st.get("runner") != "backup":
-        notify.send("حالة الرصد", "السيرفر الأساسي لا يستجيب، والتشغيل الاحتياطي استلم الرصد.", notify.QUIET)
-    seen = sheet.seen_ids(7)
-    store.kv_set("seen_remote", seen)
+        # استلام جديد: كل المصادر تبدأ من آخر فحص للتابلت، والرسالة تُرسل مرة واحدة بعد أول دورة (_takeover_note)
+        store.db().execute("UPDATE source_state SET last_ok=NULL, last_cut=NULL")
+        store.db().commit()
+        store.kv_set("takeover", {"since": st.get("last_run") or "", "sent": False})
+    elif not store.kv_get("takeover"):  # الاحتياطي شغّال من قبل لكن ذاكرته ضاعت: لا نكرر رسالة الاستلام
+        store.kv_set("takeover", {"since": st.get("server_last") or "", "sent": True})
+    store.kv_set("seen_remote", sheet.seen_ids(7))
     if last:
         store.kv_set("cut_override", iso(last - timedelta(minutes=20)))
     return True
 
 
+def _hhmm(s):
+    d = parse_dt(s) if s else None
+    if not d:
+        return ""
+    d = d.astimezone(RIYADH)
+    return f"الساعة {d:%H:%M}" if d.date() == now().astimezone(RIYADH).date() else f"يوم {d:%d/%m} الساعة {d:%H:%M}"
+
+
+def _takeover_note(detail):
+    """رسالة واحدة واضحة عند استلام الاحتياطي، بدل رسالة لكل مصدر."""
+    t = store.kv_get("takeover") or {}
+    if not t or t.get("sent"):
+        return
+    on, off = [], []
+    for k, v in detail.get("sources", {}).items():
+        n, how = NAMES.get(k, k), v.get("how", "")
+        if how.startswith(("primary", "skip")):
+            on.append(n)
+        elif how.startswith("fallback"):
+            on.append(n + " (بحث مختصر)")
+        elif k != "maps":  # الخرائط غير مفعّلة أصلًا حتى في التابلت
+            off.append(n)
+    when = _hhmm(t.get("since"))
+    msg = f"التابلت ما أرسل أي فحص{' من ' + when if when else ''}، فاستلم الرصد الاحتياطي.\n" \
+          f"يعمل الآن: {'، '.join(on) or '—'}."
+    if off:
+        msg += f"\nلا يعمل في الاحتياطي: {'، '.join(off)}."
+    msg += "\nتأكد أن التابلت شغّال ومتصل بالإنترنت، ولما يرجع يوصلك تنبيه."
+    notify.send("حالة الرصد", msg, notify.QUIET)
+    t["sent"] = True
+    store.kv_set("takeover", t)
+
+
+def backup_loop():
+    """الاحتياطي على GitHub. GitHub لا يشغّل الجدول كل ساعة فعليًا (نحو 5 مرات يوميًا)، فإذا استلم الاحتياطي
+    يبقى شغّالًا ويفحص عند :20 و:50 (بعيدًا عن دورات التابلت :05 و:35) حتى ~5.5 ساعات، ويخرج فور رجوع التابلت."""
+    end = now() + timedelta(minutes=int(config.E("SRCA_BACKUP_MINUTES", "330")))
+    while True:
+        if run() == "skipped":
+            log.info("التابلت يعمل — الاحتياطي يتوقف")
+            return
+        t = now().astimezone(RIYADH).replace(second=0, microsecond=0)
+        nxt = t.replace(minute=20) if t.minute < 20 else t.replace(minute=50) if t.minute < 50 \
+            else (t + timedelta(hours=1)).replace(minute=20)
+        if nxt > end:
+            log.info("انتهت مدة هذا التشغيل الاحتياطي؛ يكمل التشغيل المجدول التالي")
+            return
+        log.info("الدورة الاحتياطية التالية: %s", nxt.strftime("%H:%M"))
+        time.sleep(max(0.0, (nxt - now()).total_seconds()))
+
+
 def server_returned_check():
-    """يُستدعى أول دورة للسيرفر: إذا كان الاحتياطي يعمل، يُبلغ بعودة السيرفر."""
+    """يُستدعى أول دورة للتابلت: إذا كان الاحتياطي يعمل، يُبلغ برجوع التابلت."""
     if config.RUNNER == "server" and sheet.enabled():
         try:
             st = sheet.get_status()
             if st.get("runner") == "backup" and store.kv_get("returned_for") != st.get("last_run"):
                 store.kv_set("returned_for", st.get("last_run"))
-                notify.send("حالة الرصد", "السيرفر الأساسي رجع، والتشغيل الاحتياطي توقف.", notify.QUIET)
+                store.kv_set("seen_remote", sheet.seen_ids(3))  # لا نعيد التنبيه عن ما نبّه عنه الاحتياطي
+                notify.send("حالة الرصد", "التابلت رجع يشتغل، والرصد الاحتياطي توقف.", notify.QUIET)
         except Exception:
             pass
 
@@ -310,6 +380,8 @@ def main():
         st = sheet.get_status() if sheet.enabled() else {}
         last = parse_dt(st.get("last_run")) if st.get("last_run") else None
         sys.exit(0 if (not last or now() - last >= timedelta(minutes=75) or st.get("runner") == "backup") else 1)
+    elif cmd == "backup-loop":
+        backup_loop()
     else:
         print(__doc__)
 
