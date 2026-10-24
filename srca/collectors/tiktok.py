@@ -1,4 +1,5 @@
-"""تيك توك عبر خدمة Apify (بدون متصفح على التابلت)؛ بديله بحث الويب site:tiktok.com.
+"""تيك توك: افتراضيًا عبر بحث الويب site:tiktok.com كل 6 ساعات (أداة Apify صارت تقفل الحساب المجاني بعد 20 تشغيل بالشهر).
+مع اشتراك Apify مدفوع: TIKTOK_USE_APIFY=1 يرجّع المسار القديم أدناه.
 كل دورة (30 دقيقة) تبحث كل الكلمات، وتجيب لكل كلمة أحدث 2–3 فيديوهات (config.TIKTOK_COUNTS).
 التكلفة: ~0.0003$ للفيديو × 9 × 48 دورة ⇒ ~3.9$ شهريًا داخل الرصيد المجاني (5$)، مع حارس يوقفه قبل نفاد الرصيد."""
 import re
@@ -81,6 +82,12 @@ def _search(q, n):
 
 
 def primary(cut_dt):
+    if not config.TIKTOK_USE_APIFY:
+        # أداة Apify تقفل الحساب المجاني بعد 20 تشغيل بالشهر ← تيك توك عبر بحث الويب كل 6 ساعات (بدون تكلفة)
+        if not websearch.available():
+            raise SourceDown("NO_KEY")
+        extra = _web_extra()
+        return extra, {"status": f"web:{len(extra)}" if extra else "web (ليس وقته)"}
     if not config.APIFY_TOKEN:
         raise SourceDown("NO_KEY")
     if not _budget_ok():
