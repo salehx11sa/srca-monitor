@@ -1,20 +1,26 @@
-# التشغيل الاحتياطي: كل ساعة يتأكد أن السيرفر يعمل؛ إذا غاب أكثر من 75 دقيقة يشغّل الرصد من هنا.
+# التشغيل الاحتياطي: يتأكد دوريًا أن التابلت يعمل؛ إذا غاب أكثر من 75 دقيقة يستلم الرصد من هنا،
+# ويبقى شغّالًا (فحص عند :20 و:50) حتى يرجع التابلت — لأن GitHub لا يشغّل الجدول كل ساعة فعليًا (~5 مرات يوميًا).
+# ذاكرة الاحتياطي تُحفظ بين التشغيلات (cache) حتى لا تتكرر رسائل الحالة، ورسالة الاستلام واحدة مجمّعة.
 name: srca-backup
 on:
   schedule:
     - cron: "17 * * * *"
+    - cron: "47 * * * *"
   workflow_dispatch: {}
 concurrency: { group: srca-backup, cancel-in-progress: false }
 jobs:
   backup:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 355
     env:
       SRCA_RUNNER: backup
+      SRCA_DATA: ${{ github.workspace }}/data
+      SRCA_BACKUP_MINUTES: "330"
       X_AUTH_TOKEN: ${{ secrets.X_AUTH_TOKEN }}
       X_CT0: ${{ secrets.X_CT0 }}
       X_AUTH_TOKEN_2: ${{ secrets.X_AUTH_TOKEN_2 }}
-      TIKTOK_COOKIES: ${{ secrets.TIKTOK_COOKIES }}
+      APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}
+      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       PUSHOVER_TOKEN: ${{ secrets.PUSHOVER_TOKEN }}
@@ -33,6 +39,17 @@ jobs:
       - id: gate
         run: python -m srca.main should-backup && echo "go=1" >> $GITHUB_OUTPUT || echo "go=0" >> $GITHUB_OUTPUT
       - if: steps.gate.outputs.go == '1'
+        uses: actions/cache/restore@v4
+        with:
+          path: data
+          key: srca-bk-${{ github.run_id }}
+          restore-keys: srca-bk-
+      - if: steps.gate.outputs.go == '1'
         run: pip install -q playwright && python -m playwright install --with-deps chromium
       - if: steps.gate.outputs.go == '1'
-        run: python -m srca.main run
+        run: python -m srca.main backup-loop
+      - if: always() && steps.gate.outputs.go == '1'
+        uses: actions/cache/save@v4
+        with:
+          path: data
+          key: srca-bk-${{ github.run_id }}-${{ github.run_attempt }}
