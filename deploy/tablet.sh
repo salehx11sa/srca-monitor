@@ -7,11 +7,23 @@
 #  - بيئة لينكس (Debian) معزولة داخل Termux فيها متصفح خاص بالرصد (لا يلمس كروم التابلت).
 #  - الرصد كل 30 دقيقة (:05 و:35)، الملخص اليومي 8:00، الأسبوعي الأحد 8:10، الشهري أول الشهر 8:20 — بتوقيت الرياض.
 #  - تشغيل تلقائي بعد إعادة الإقلاع عبر ملف مستقل: ~/.termux/boot/srca-boot.sh
+#  - 2026-10-24: «حارس» يعيد تشغيل المجدول تلقائيًا إذا توقف أو علّق، ومهلة لكل خطوة (لا تعليق للأبد).
 # ما لا يلمسه أبدًا: tyworker.py · tyhelper.dex · .tyworker.json · tyw-*.sh · boot/tyw-boot.sh · crontab · كروم.
 set -e
 R=https://github.com/salehx11sa/srca-monitor.git
 D=debian   # متصفح Debian الرسمي يُنزّل من نفس خوادم البرامج (أثبت من خادم Playwright على شبكة البيت)
 say() { printf '\n\033[1;32m== %s ==\033[0m\n' "$1"; }
+
+say "0/5 تشخيص سريع (صوّر هذا الجزء وأرسله لـ Claude إذا تبي يعرف سبب التوقف)"
+{
+  echo "الوقت الآن: $(date '+%F %T')"
+  echo "التابلت شغّال من: $(uptime -s 2>/dev/null || echo 'غير معروف')"
+  pgrep -f "srca-loop.sh" >/dev/null && echo "المجدول: كان شغّال" || echo "المجدول: كان متوقف"
+  echo "آخر نشاط للرصد: $(date -r ~/srca-run.log '+%F %T' 2>/dev/null || echo 'لا يوجد')"
+  echo "-- آخر سطور الفحص:"; tail -n 4 ~/srca-run.log 2>/dev/null | cut -c1-150
+  echo "-- آخر سطور المجدول:"; tail -n 3 ~/srca-loop.out 2>/dev/null | cut -c1-150
+  echo "-- عمليات الرصد الآن:"; pgrep -af "srca-loop|srca-keeper|srca.main|git-remote|debugging-port=9222" 2>/dev/null | cut -c1-110 | head -8
+} 2>&1 | tee ~/srca-diag.txt || true
 
 say "1/5 تجهيز Termux"
 dpkg --configure -a >/dev/null 2>&1 || true
@@ -41,9 +53,11 @@ sed -i '/^CHROME_PATH=/d' .env; grep -q '^CHROME_CDP=' .env || echo CHROME_CDP=h
 
 say "5/5 الجدولة"
 set +e   # من هنا: لا نتوقف عند أول خطأ، نكمل ونطبع الحالة
+pkill -9 -f "srca-keeper.sh" 2>/dev/null
 pkill -9 -f "srca-loop.sh" 2>/dev/null
-for i in 1 2 3 4 5; do pgrep -f "srca-loop.sh" >/dev/null || break; sleep 1; done
-rm -f ~/.srca-loop.lock
+pkill -f "srca.main" 2>/dev/null   # فحص عالق من قبل (داخل بيئة لينكس) — يخص الرصد فقط
+for i in 1 2 3 4 5; do pgrep -f "srca-loop.sh|srca-keeper.sh" >/dev/null || break; sleep 1; done
+rm -f ~/.srca-loop.lock ~/.srca-keeper.lock
 cat > ~/srca-chrome.sh <<'CHR'
 #!/data/data/com.termux/files/usr/bin/bash
 # متصفح الرصد الخاص (Chromium من Termux، مستقل عن كروم التابلت) — يُعاد تشغيله نظيفًا قبل كل فحص (كان يعلّق وهو «يرد»).
@@ -62,11 +76,13 @@ cat > ~/srca-loop.sh <<'LOOP'
 exec 9>~/.srca-loop.lock
 flock -n 9 || exit 0
 export TZ=Asia/Riyadh
-run() { # $1 = run|daily|weekly|monthly
-  ~/srca-chrome.sh
-  proot-distro login debian --shared-tmp -- bash -lc \
-    "cd /root/srca-monitor && git pull -q --ff-only 2>/dev/null; TZ=Asia/Riyadh timeout 1500 .venv/bin/python -m srca.main $1" \
+run() { # $1 = run|daily|weekly|monthly — لكل خطوة مهلة، فلا يعلّق المجدول أبدًا
+  echo "$(date '+%F %T') بدء $1" >> ~/srca-$1.log
+  timeout 120 ~/srca-chrome.sh
+  timeout -k 30 1700 proot-distro login debian --shared-tmp -- bash -lc \
+    "cd /root/srca-monitor && timeout 90 git pull -q --ff-only 2>/dev/null; TZ=Asia/Riyadh timeout 1500 .venv/bin/python -m srca.main $1" \
     >> ~/srca-$1.log 2>&1
+  [ $? -ge 124 ] && { echo "$(date '+%F %T') انتهت المهلة — أُوقف الفحص العالق" >> ~/srca-$1.log; pkill -f "srca.main $1"; }
   tail -n 400 ~/srca-$1.log > ~/srca-$1.log.tmp && mv ~/srca-$1.log.tmp ~/srca-$1.log
 }
 last=""
@@ -85,18 +101,41 @@ while true; do
 done
 LOOP
 chmod +x ~/srca-loop.sh
+cat > ~/srca-keeper.sh <<'KEEP'
+#!/data/data/com.termux/files/usr/bin/bash
+# حارس رصد الهلال: كل 5 دقائق يتأكد أن المجدول شغّال؛ إذا توقف يشغّله، وإذا علّق (لا نشاط 80 دقيقة) يعيد تشغيله.
+# لا يلمس أي مهمة أخرى على التابلت.
+exec 8>~/.srca-keeper.lock
+flock -n 8 || exit 0
+start_loop() { nohup bash ~/srca-loop.sh >> ~/srca-loop.out 2>&1 < /dev/null & }
+note() { echo "$(date '+%F %T') $1" >> ~/srca-keeper.log; tail -n 100 ~/srca-keeper.log > ~/srca-keeper.log.tmp && mv ~/srca-keeper.log.tmp ~/srca-keeper.log; }
+last_fix=$(date +%s)   # مهلة ساعة بعد بدء الحارس قبل الحكم بأن المجدول عالق
+while true; do
+  termux-wake-lock 2>/dev/null
+  t=$(date +%s)
+  if ! pgrep -f "srca-loop.sh" >/dev/null; then
+    rm -f ~/.srca-loop.lock; start_loop; note "المجدول كان متوقف — شُغّل"
+  elif [ -f ~/srca-run.log ] && [ $(( t - $(date -r ~/srca-run.log +%s) )) -gt 4800 ] && [ $(( t - last_fix )) -gt 3600 ]; then
+    pkill -9 -f "srca-loop.sh"; pkill -f "srca.main"; sleep 3; rm -f ~/.srca-loop.lock; start_loop; last_fix=$t
+    note "المجدول كان عالق — أُعيد تشغيله"
+  fi
+  sleep 300
+done
+KEEP
+chmod +x ~/srca-keeper.sh
 mkdir -p ~/.termux/boot
 cat > ~/.termux/boot/srca-boot.sh <<'BOOT'
 #!/data/data/com.termux/files/usr/bin/bash
 termux-wake-lock 2>/dev/null
 sleep 60
-nohup bash ~/srca-loop.sh > ~/srca-loop.out 2>&1 < /dev/null &
+nohup bash ~/srca-keeper.sh > /dev/null 2>&1 < /dev/null &
 BOOT
 chmod +x ~/.termux/boot/srca-boot.sh
 termux-wake-lock 2>/dev/null || true
-nohup bash ~/srca-loop.sh > ~/srca-loop.out 2>&1 < /dev/null &
+: > ~/srca-loop.out
+nohup bash ~/srca-keeper.sh > /dev/null 2>&1 < /dev/null &
 disown 2>/dev/null
-sleep 3; pgrep -f srca-loop.sh >/dev/null && echo "✔ الجدولة شغّالة" || { echo "!! الجدولة ما اشتغلت:"; tail -n 5 ~/srca-loop.out; }
+sleep 5; pgrep -f srca-loop.sh >/dev/null && echo "✔ الجدولة شغّالة (ومعها حارس يعيد تشغيلها لو وقفت)" || { echo "!! الجدولة ما اشتغلت:"; tail -n 5 ~/srca-loop.out; }
 
 pkill -f "remote-debugging-port=9222" 2>/dev/null; sleep 2
 ~/srca-chrome.sh && echo "✔ متصفح الرصد شغّال" || echo "!! متصفح الرصد ما اشتغل"
