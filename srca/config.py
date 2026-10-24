@@ -61,7 +61,10 @@ TIKTOK_COUNTS = {"الهلال الاحمر السعودي": 2, "الهلال ا
 TIKTOK_TERMS = list(TIKTOK_COUNTS)
 # بحث إضافي في تيك توك عبر Tavily مرتين في اليوم (يلقط اللي فات Apify + كلمات إضافية بدون تكلفة Apify)
 TIKTOK_WEB_TERMS = ["الهلال الاحمر السعودي", "هيئة الهلال الاحمر", "تطوع الهلال الاحمر", "اسعاف الهلال الاحمر"]
-TIKTOK_WEB_EVERY_H = 12
+# 2026-10-24: أداة Apify لتيك توك صارت تقفل الحساب المجاني بعد 20 تشغيل بالشهر، والبدائل مقفلة أو غالية على المجاني
+# ← تيك توك صار عبر بحث الويب كل 6 ساعات (بدون تكلفة). لإرجاع Apify (لو اشتراك مدفوع): TIKTOK_USE_APIFY=1
+TIKTOK_USE_APIFY = E("TIKTOK_USE_APIFY", "0") == "1"
+TIKTOK_WEB_EVERY_H = 6
 
 # قنوات تيليجرام عامة (إخبارية) تُفحص بحثًا عن ذكر الهيئة — أضف ما تشاء
 TELEGRAM_CHANNELS = [c for c in E("TELEGRAM_CHANNELS", "SaudiNews50,SPA_News,News_Ejazah,mediasrca,awamir_11,wadhefadotcom").split(",") if c]
