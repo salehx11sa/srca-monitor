@@ -1,5 +1,5 @@
 """التصنيف بالذكاء الاصطناعي المجاني: Gemini أولًا، ثم Groq، ثم القواعد. لا Claude."""
-import json, re
+import json, re, time
 from pathlib import Path
 
 from .. import config
@@ -101,10 +101,13 @@ def _groq(prompt, n):
     raise AIDown(str(last))
 
 
-def classify(items, examples=(), batch_size=12):
-    """يرجع (نتائج لكل عنصر بنفس الترتيب، الطبقة المستخدمة)."""
+def classify(items, examples=(), batch_size=12, deadline=None):
+    """يرجع (نتائج لكل عنصر بنفس الترتيب، الطبقة المستخدمة).
+    deadline (وقت يونكس): إذا مر، يوقف قبل الدفعة التالية ويرجع نتائج ما صُنّف فقط (الباقي للدورة الجاية)."""
     results, used = [], set()
     for k in range(0, len(items), batch_size):
+        if deadline and results and time.time() > deadline:
+            break
         batch = items[k:k + batch_size]
         prompt = _prompt(batch, list(examples))
         got = None
