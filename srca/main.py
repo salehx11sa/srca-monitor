@@ -1,6 +1,6 @@
 """المنسّق: python -m srca.main run|daily|weekly|monthly|test|should-backup|backup-loop
 كل تعقيد التشغيل هنا؛ أنت لا ترى إلا التنبيهات والجدول واللوحة."""
-import sys, time, traceback
+import json, sys, time, traceback
 from datetime import timedelta
 
 from . import config, dedupe, notify, reports, sheet, store
@@ -55,7 +55,7 @@ def collect_source(name, start):
         detail = info.get("status", "") if isinstance(info, dict) else ""
         if st.get("mode") not in ("primary", None) and st.get("mode") != "nokey":
             _notice(name, "primary")
-        store.src_set(name, last_ok=iso(start), last_cut=iso(start), mode="primary", fails=0, last_error="")
+        store.src_set(name, last_ok=iso(start), mode="primary", fails=0, last_error="")  # last_cut بعد حفظ المنشورات (run)
         return items, "primary " + detail
     except Exception as e:
         err = f"{type(e).__name__}: {str(e)[:150]}"
@@ -66,7 +66,7 @@ def collect_source(name, start):
             raise RuntimeError("no fallback")
         if st.get("mode") != "fallback" and not nokey:
             _notice(name, "fallback")
-        store.src_set(name, last_ok=iso(start), last_cut=iso(start), mode="fallback", fails=0, last_error=err)
+        store.src_set(name, last_ok=iso(start), mode="fallback", fails=0, last_error=err)
         return items, "fallback (" + err + ")"
     except Exception as e2:
         mode = "nokey" if nokey and isinstance(e2, (NoBackend, RuntimeError, simple.SourceDown, tiktok.SourceDown)) else "down"
@@ -164,23 +164,45 @@ def run():
                 store.run_end(rid, "skipped", {"reason": "server alive"})
                 return "skipped"
         fb, blocked = _feedback()
-        collected = []
+        collected, ok_sources = [], []
         for name in config.SOURCES:
             if name not in SOURCES:
                 continue
             items, how = collect_source(name, start)
             detail["sources"][name] = {"n": len(items), "how": how}
             collected += items
+            if how.startswith(("primary", "fallback")):
+                ok_sources.append(name)
         new = store.add_items(collected)
+        for name in ok_sources:  # نقطة البداية تتقدم بعد حفظ المنشورات فقط؛ لو انقطعت الدورة قبلها تُعاد نفس الفترة
+            store.src_set(name, last_cut=iso(start))
+        # بقايا دورة سابقة انقطعت قبل ما تكمل التصنيف (مثل أول دورة بعد توقف طويل): تُكمَّل الآن
+        new_ids = {it["id"] for it in new}
+        left = []
+        for r in store.rows("relevance IS NULL AND collected >= ?", (store.since(48),), order="collected"):
+            if r["id"] in new_ids:
+                continue
+            try:
+                r["extra"] = json.loads(r.get("extra") or "{}")
+            except Exception:
+                r["extra"] = {}
+            left.append(r)
+        if left:
+            log.info("تكملة تصنيف %s منشورًا بقيت من دورة سابقة", len(left))
         keep = []
-        for it in new:
+        for it in left + new:
             ok, why = rules.prefilter(it, blocked)
             if ok:
                 keep.append(it)
             else:
                 store.update_item(it["id"], relevance="مستبعد", reason=why, classifier="prefilter")
         examples = [f for f in fb if f.get("text")]
-        res, used = llm.classify(keep, examples) if keep else ([], set())
+        deadline = start.timestamp() + 60 * int(config.E("SRCA_CLASSIFY_MIN", "19"))
+        res, used = llm.classify(keep, examples, deadline=deadline) if keep else ([], set())
+        if len(res) < len(keep):  # الوقت قارب ينتهي: الباقي يبقى بلا تصنيف ويكمّل في الدورة الجاية
+            detail["deferred"] = len(keep) - len(res)
+            log.warning("وقت الدورة قارب ينتهي: %s منشورًا يكمّل تصنيفها في الدورة الجاية", detail["deferred"])
+            keep = keep[:len(res)]
         ai_mode = "rules" if used == {"rules"} else "ai"
         if keep and store.kv_get("ai_mode", "ai") != ai_mode:
             store.kv_set("ai_mode", ai_mode)
