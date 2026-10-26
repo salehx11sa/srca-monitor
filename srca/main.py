@@ -1,13 +1,13 @@
 """المنسّق: python -m srca.main run|daily|weekly|monthly|test|should-backup|backup-loop
 كل تعقيد التشغيل هنا؛ أنت لا ترى إلا التنبيهات والجدول واللوحة."""
-import json, sys, time, traceback
+import json, os, sys, time, traceback
 from datetime import timedelta
 
-from . import config, dedupe, notify, reports, sheet, store
+from . import config, dedupe, health, notify, reports, sheet, store
 from .classify import llm, rules
 from .collectors import simple, tiktok, x
 from .collectors.websearch import NoBackend
-from .util import get, log, now, iso, parse_dt, riyadh, RIYADH
+from .util import get, post, log, now, iso, parse_dt, riyadh, RIYADH
 
 NAMES = {"x": "X", "tiktok": "تيك توك", "news": "الأخبار", "youtube": "يوتيوب", "telegram": "قنوات تيليجرام",
          "apps": "تقييمات التطبيقات", "reddit": "ريديت", "web": "المنتديات والمواقع", "maps": "خرائط قوقل"}
@@ -20,10 +20,16 @@ SOURCES = {
 }
 
 
-def ping(suffix=""):
+def ping(suffix="", body=None):
+    """نبضة Healthchecks. مع body: ملخص الدورة يظهر في سجل الفحص هناك (تشخيص عن بعد بدون التابلت)."""
     if config.HEALTHCHECK_URL:
+        url = config.HEALTHCHECK_URL.rstrip("/") + suffix
         try:
-            get(config.HEALTHCHECK_URL.rstrip("/") + suffix, retries=1, timeout=10)
+            if body:
+                post(url, retries=1, timeout=10, data=body.encode("utf-8"),
+                     headers={"Content-Type": "text/plain; charset=utf-8"})
+            else:
+                get(url, retries=1, timeout=10)
         except Exception:
             pass
 
@@ -39,6 +45,18 @@ def _notice(source, mode, detail=""):
     notify.send("حالة الرصد", msg, notify.QUIET)
 
 
+def _how(info):
+    """وصف نتيجة المصدر: الحالة + كم بحث اكتمل + حد الطلبات (يفيد منبّه الأعطال والتشخيص)."""
+    if not isinstance(info, dict):
+        return ""
+    s = str(info.get("status", "") or "")
+    if info.get("total"):
+        s += f" q={info.get('done', 0)}/{info['total']}"
+    if info.get("rl"):
+        s += f" rl={info['rl']}"
+    return s.strip()
+
+
 def collect_source(name, start):
     prim, fb = SOURCES[name]
     st = store.src_get(name)
@@ -52,7 +70,7 @@ def collect_source(name, start):
     try:
         res = prim(cut)
         items, info = res if isinstance(res, tuple) else (res, {})
-        detail = info.get("status", "") if isinstance(info, dict) else ""
+        detail = _how(info)
         if st.get("mode") not in ("primary", None) and st.get("mode") != "nokey":
             _notice(name, "primary")
         store.src_set(name, last_ok=iso(start), mode="primary", fails=0, last_error="")  # last_cut بعد حفظ المنشورات (run)
@@ -231,15 +249,26 @@ def run():
         down = [k for k, v in detail["sources"].items() if v["how"].startswith("down")]
         status = "ok" if len(down) < max(1, len(detail["sources"]) // 2) else "degraded"
         store.run_end(rid, status, detail)
-        if _status(start) and config.RUNNER == "backup":
+        sheet_ok = _status(start)
+        if sheet_ok and config.RUNNER == "backup":
             _takeover_note(detail)
-        ping("" if status == "ok" else "/fail")
+        if config.RUNNER == "server" and not os.environ.get("GITHUB_ACTIONS"):  # منبّه الأعطال (التابلت فقط) — لا يوقف الدورة أبدًا
+            try:
+                health.check(detail, sheet_ok if sheet.enabled() else None)
+            except Exception as e:
+                log.warning("منبّه الأعطال تعذر: %s", e)
+        body = None
+        try:
+            body = health.summary(detail, status, sheet_ok if sheet.enabled() else None)
+        except Exception:
+            pass
+        ping("" if status == "ok" else "/fail", body)
         log.info("انتهى الفحص: %s", detail)
     except Exception:
         tb = traceback.format_exc()
         log.error(tb)
         store.run_end(rid, "error", {"error": tb[-1500:]})
-        ping("/fail")
+        ping("/fail", "خطأ في الدورة:\n" + tb[-1500:])
         fails = store.kv_get("run_fails", 0) + 1
         store.kv_set("run_fails", fails)
         if fails == 3:  # رسالة واحدة فقط بعد 3 إخفاقات متتالية
@@ -369,6 +398,7 @@ def server_returned_check():
 
 def test():
     """فحص سريع لكل جزء ويرسل إشعار تجربة واحد."""
+    x.USE_PENDING = False
     out = []
     for name in config.SOURCES:
         try:
@@ -394,6 +424,11 @@ def main():
     if cmd == "run":
         server_returned_check()
         run()
+        if config.RUNNER == "server" and not os.environ.get("GITHUB_ACTIONS"):  # الملخص اليومي فات موعده؟ يُرسل الآن (إشارة «النظام شغّال» اليومية)
+            try:
+                health.daily_guard()
+            except Exception as e:
+                log.warning("تعذر فحص الملخص اليومي: %s", e)
     elif cmd in ("daily", "weekly", "monthly"):
         print(reports.report(cmd))
     elif cmd == "test":

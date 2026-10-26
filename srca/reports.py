@@ -21,6 +21,13 @@ def _health_line():
     names = {"x": "X", "tiktok": "تيك توك", "news": "الأخبار", "youtube": "يوتيوب", "telegram": "تيليجرام",
              "apps": "التطبيقات", "reddit": "ريديت", "web": "المنتديات", "maps": "الخرائط"}
     s = f"النظام شغّال ✔ — آخر فحص {t[-5:]}"
+    try:  # عطل قائم من منبّه الأعطال (مثل X يشتغل ناقص) يظهر هنا بدل ما يختفي خلف «شغّال»
+        from . import health
+        n = health.note()
+        if n:
+            s += " — " + n
+    except Exception:
+        pass
     if bad:
         s += " — يعمل بالبديل أو متوقف: " + "، ".join(names.get(b, b) for b in bad)
     if off:
@@ -73,6 +80,8 @@ def report(kind="daily"):
         "\n\n" + _health_line()
     title = f"{label} لرصد الهلال — {date}"
     notify.send(title, short, notify.NORMAL, sheet.dashboard_url() or None, "افتح اللوحة")
+    if kind == "daily":  # لمنبّه الأعطال: ملخص اليوم وصل (ما يُعاد)
+        store.kv_set("daily_sent", now().astimezone(RIYADH).strftime("%Y-%m-%d"))
     if sheet.enabled() and rows_seen:  # النسخة الكاملة بالبريد
         try:
             sheet.email(title, f"<div dir='rtl' style='font-family:Tahoma,Arial'><p>{head.replace(chr(10), '<br>')}</p>"

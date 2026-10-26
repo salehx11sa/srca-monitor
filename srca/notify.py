@@ -18,7 +18,7 @@ def _fit(msg, n=1024):
     return (msg[:cut] if cut > 0 else msg[:n - 40].rsplit("<", 1)[0]) + "\n\n…والباقي في اللوحة."
 
 
-def _pushover(title, msg, pri, url=None, url_title=None):
+def _pushover(title, msg, pri, url=None, url_title=None, team=True):
     if not (config.PUSHOVER_TOKEN and config.PUSHOVER_USER):
         raise RuntimeError("NO_PUSHOVER")
     data = {"token": config.PUSHOVER_TOKEN, "user": config.PUSHOVER_USER, "title": title[:250], "message": _fit(msg),
@@ -30,7 +30,7 @@ def _pushover(title, msg, pri, url=None, url_title=None):
     r = post("https://api.pushover.net/1/messages.json", data=data, retries=2)
     if r.status_code != 200:
         raise RuntimeError(f"PUSHOVER HTTP{r.status_code} {r.text[:120]}")
-    if pri == QUIET:  # الرسائل التقنية لصالح وحده
+    if pri == QUIET or not team:  # الرسائل التقنية (ومنبّه الأعطال) لصالح وحده
         return
     for key in config.PUSHOVER_TEAM:  # الزملاء: فشل أحدهم لا يوقف شيئًا ولا يحوّل القناة
         if key == config.PUSHOVER_USER:
@@ -43,7 +43,7 @@ def _pushover(title, msg, pri, url=None, url_title=None):
             log.warning("تعذر تنبيه زميل (%s…): %s", key[:5], str(e)[:80])
 
 
-def _telegram(title, msg, pri, url=None, url_title=None):
+def _telegram(title, msg, pri, url=None, url_title=None, team=True):
     if not (config.TELEGRAM_BOT and config.TELEGRAM_CHAT):
         raise RuntimeError("NO_TELEGRAM")
     text = f"<b>{_h.escape(title)}</b>\n{msg}" + (f'\n<a href="{_h.escape(url)}">{_h.escape(url_title or "افتح")}</a>' if url else "")
@@ -54,7 +54,7 @@ def _telegram(title, msg, pri, url=None, url_title=None):
         raise RuntimeError(f"TELEGRAM HTTP{r.status_code}")
 
 
-def _email(title, msg, pri, url=None, url_title=None):
+def _email(title, msg, pri, url=None, url_title=None, team=True):
     body = f"<div dir='rtl' style='font-family:Tahoma,Arial;font-size:15px;line-height:1.8'>{msg.replace(chr(10), '<br>')}"
     if url:
         body += f"<p><a href='{_h.escape(url)}'>{_h.escape(url_title or 'افتح')}</a></p>"
@@ -64,12 +64,13 @@ def _email(title, msg, pri, url=None, url_title=None):
 CHAIN = [("Pushover", _pushover), ("تيليجرام", _telegram), ("البريد", _email)]
 
 
-def send(title, msg, pri=NORMAL, url=None, url_title=None):
-    """يرسل عبر أول قناة تعمل. إذا تعطلت الأساسية يُبلَّغ مرة واحدة عبر البديل."""
+def send(title, msg, pri=NORMAL, url=None, url_title=None, team=True):
+    """يرسل عبر أول قناة تعمل. إذا تعطلت الأساسية يُبلَّغ مرة واحدة عبر البديل.
+    team=False: لصالح وحده حتى لو كانت الرسالة بصوت (مثل منبّه الأعطال)."""
     errors = []
     for i, (name, fn) in enumerate(CHAIN):
         try:
-            fn(title, msg, pri, url, url_title)
+            fn(title, msg, pri, url, url_title, team)
             prev = store.kv_get("notify_channel", "Pushover")
             if prev != name:
                 store.kv_set("notify_channel", name)
