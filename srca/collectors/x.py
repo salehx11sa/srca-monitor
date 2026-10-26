@@ -7,6 +7,7 @@ from ..util import item, log, parse_dt
 from .browser import chrome
 
 BUDGET = 12 * 60  # أقصى وقت لجمع X في التشغيلة الواحدة (ثانية)
+USE_PENDING = True  # أمر test يوقفه حتى لا يلمس البحوث المؤجلة
 PARENT_CAP = 6     # أقصى عدد تغريدات أصلية تُجلب لسياق الردود في التشغيلة الواحدة
 JS = (Path(__file__).parent / "x_collector.js").read_text(encoding="utf-8")
 
@@ -141,9 +142,28 @@ def _search(pg, raw):
         return "TIMEOUT", None, None, None
 
 
+def _pending_load():
+    """البحوث اللي ما اكتملت في الدورة الماضية (حد الطلبات أو الوقت): {مفتاح البحث: نقطة بدايته القديمة}."""
+    from .. import store
+    try:
+        p = store.kv_get("x_pending") or {}
+    except Exception:
+        return {}
+    floor = int(time.time()) - 24 * 3600  # لا نرجع أكثر من يوم
+    return {k: max(int(v), floor) for k, v in p.items() if isinstance(v, (int, float))}
+
+
+def _pending_save(p):
+    from .. import store
+    try:
+        store.kv_set("x_pending", p)
+    except Exception as e:
+        log.info("X: تعذر حفظ البحوث المؤجلة: %s", str(e)[:80])
+
+
 def _run_with(token, cut_unix, keys=None):
     """كل استعلام يُفتح كصفحة مستقلة (أثبت من التنقل الداخلي الذي قد يعيد تحميل الصفحة)."""
-    db, qlog, rl, stopped, reset = {}, [], None, "DONE", None
+    db, qlog, rl, stopped, reset, total = {}, [], None, "DONE", None, 0
     with chrome(_cookies(token)) as ctx:
         ctx.add_init_script(JS)  # أداة التحليل متاحة في كل صفحة
         pg = ctx.new_page()
@@ -152,8 +172,15 @@ def _run_with(token, cut_unix, keys=None):
         if "/home" not in pg.url:
             raise SourceDown("LOGIN_REQUIRED " + pg.url.split("?")[0])
         qs = pg.evaluate("SRCA.QS")
+        full = not keys and USE_PENDING  # دورة كاملة (مو تجربة)
         keys = [k for k in (keys or []) if k in qs] or (list(qs)[:1] if keys else None)
-        queue = [{"k": k, "until": None, "pages": 0, "got": 0, "tries": 0} for k in (keys or list(qs))]
+        order = keys or list(qs)
+        # البحوث اللي ما لحقت الدورة الماضية تبدأ أولًا ومن نقطتها القديمة، فما يضيع شي ولا يبقى بحث محروم
+        pend = {k: c for k, c in _pending_load().items() if k in order} if full else {}
+        order = sorted(order, key=lambda k: (k not in pend, pend.get(k, 0)))
+        queue = [{"k": k, "until": None, "pages": 0, "got": 0, "tries": 0, "cut": min(pend.get(k, cut_unix), cut_unix)}
+                 for k in order]
+        total = len(queue)
         waited, t0 = 0, time.time()
         while queue:
             if time.time() - t0 > BUDGET:
@@ -161,7 +188,7 @@ def _run_with(token, cut_unix, keys=None):
                 stopped = "BUDGET"
                 break
             it = queue[0]
-            raw = qs[it["k"]] + f" since_time:{cut_unix}" + (f" until_time:{it['until']}" if it["until"] else "")
+            raw = qs[it["k"]] + f" since_time:{it['cut']}" + (f" until_time:{it['until']}" if it["until"] else "")
             status, j, rs, rem = _search(pg, raw)
             if rem is not None:
                 rl = f"{rem}/{rs}"
@@ -188,7 +215,7 @@ def _run_with(token, cut_unix, keys=None):
             it["pages"] += 1
             tw = pg.evaluate("j => SRCA.parse(j)", j)
             for t in tw:
-                if parse_dt(t["t"]).timestamp() < cut_unix:
+                if parse_dt(t["t"]).timestamp() < it["cut"]:
                     continue
                 if t["id"] not in db:
                     t["qs"] = [it["k"]]
@@ -197,13 +224,15 @@ def _run_with(token, cut_unix, keys=None):
                 elif it["k"] not in db[t["id"]]["qs"]:
                     db[t["id"]]["qs"].append(it["k"])
             oldest = int(min(parse_dt(t["t"]).timestamp() for t in tw)) if tw else 0
-            done = not tw or oldest <= cut_unix or it["pages"] >= config.X_PAGES_CAP or (it["until"] and oldest >= it["until"])
+            done = not tw or oldest <= it["cut"] or it["pages"] >= config.X_PAGES_CAP or (it["until"] and oldest >= it["until"])
             if done:
                 qlog.append({"k": it["k"], "pages": it["pages"], "got": it["got"],
-                             "status": "end" if not tw else "cut" if oldest <= cut_unix else "CAP"})
+                             "status": "end" if not tw else "cut" if oldest <= it["cut"] else "CAP"})
                 queue.pop(0)
             else:
                 it["until"] = oldest
+        if full:  # ما اكتمل (توقف بحد الطلبات/الوقت أو فشل) يُكمَّل أول الدورة الجاية من نقطته
+            _pending_save({q["k"]: q["cut"] for q in queue})  # الفاشل 3 مرات لا يُؤجل (يبقى بمكانه المعتاد كما كان)
         if db and stopped != "BUDGET":
             try:
                 _attach_parents(db, _parents(pg, db))
@@ -213,7 +242,9 @@ def _run_with(token, cut_unix, keys=None):
     status = "DONE" if stopped == "DONE" else ("PARTIAL_429" if stopped == "429" else "PARTIAL_TIME")
     if qlog and bad > len(qlog) / 2:
         status = "FAILED_QUERIES"
-    return [_to_item(t) for t in db.values() if t.get("id")], {"status": status, "queries": qlog, "rl": rl}
+    done = len(qlog) - bad  # عمليات البحث اللي اكتملت من أصل total (للتشخيص في سجل Healthchecks)
+    return [_to_item(t) for t in db.values() if t.get("id")], {"status": status, "queries": qlog, "rl": rl,
+                                                             "done": done, "total": total}
 
 
 def collect(cut_dt, keys=None):
