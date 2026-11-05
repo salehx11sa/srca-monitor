@@ -34,7 +34,7 @@ TAVILY_KEY = E("TAVILY_API_KEY")               # بحث الويب (بديل X �
 GEMINI_KEY = E("GEMINI_API_KEY")
 GEMINI_MODELS = [m for m in E("GEMINI_MODELS", "gemini-flash-latest,gemini-3.8-flash,gemini-3.5-flash,gemini-flash-lite-latest").split(",") if m]
 GROQ_KEY = E("GROQ_API_KEY")
-GROQ_MODELS = [m for m in E("GROQ_MODELS", "llama-3.3-70b-versatile,openai/gpt-oss-120b").split(",") if m]
+GROQ_MODELS = [m for m in E("GROQ_MODELS", "openai/gpt-oss-120b,qwen/qwen3.8-27b").split(",") if m]
 PUSHOVER_TOKEN = E("PUSHOVER_TOKEN")
 PUSHOVER_USER = E("PUSHOVER_USER")
 # زملاء يستلمون التنبيهات والتقارير (رسائل «حالة الرصد» التقنية تبقى لصالح فقط). مفاتيح مفصولة بفاصلة.
