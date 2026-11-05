@@ -34,15 +34,25 @@ def ping(suffix="", body=None):
             pass
 
 
-def _notice(source, mode, detail=""):
+def _notice(source, mode, prev_mode=None):
+    """رسالة حالة المصدر — بلا تذبذب: العطل يُعلن بعد 3 دورات متتالية، والرجوع بعد 3 دورات سليمة متتالية."""
     if config.RUNNER == "backup":
         return  # الاحتياطي لا يرسل رسالة لكل مصدر؛ يرسل رسالة واحدة مجمّعة عند الاستلام (_takeover_note)
     n = NAMES.get(source, source)
-    msg = {"fallback": f"مصدر «{n}» متعطل، والرصد مستمر عن طريق البديل.",
-           "down": f"مصدر «{n}» متوقف هو وبديله. بقية المصادر تعمل، وسأبلغك إذا رجع.",
-           "primary": f"مصدر «{n}» رجع يعمل بشكل طبيعي.",
-           "nokey": f"مصدر «{n}» غير مفعّل بعد (ينقصه حساب أو مفتاح)."}[mode]
-    notify.send("حالة الرصد", msg, notify.QUIET)
+    if mode == "nokey":
+        notify.send("حالة الرصد", f"مصدر «{n}» غير مفعّل بعد (ينقصه حساب أو مفتاح).", notify.QUIET)
+        return
+    if source == "x":
+        return  # X يتولاه منبّه الأعطال (health.check) برسالة أوضح وسببها
+    init = prev_mode if prev_mode in ("fallback", "down") else ""
+    ev, since = health.streak("src:" + source, mode in ("fallback", "down"), mode, init_alert=init)
+    if ev in ("alert", "worse"):
+        msg = {"fallback": f"مصدر «{n}» متعطل من الساعة {health._t(since)}، والرصد مستمر عن طريق البديل.",
+               "down": f"مصدر «{n}» متوقف هو وبديله من الساعة {health._t(since)}. "
+                       "بقية المصادر تعمل، وسأبلغك إذا رجع."}[mode]
+        notify.send("حالة الرصد", msg, notify.QUIET)
+    elif ev == "back":
+        notify.send("حالة الرصد", f"مصدر «{n}» رجع يعمل بشكل طبيعي (كان متعطل من {health._t(since)}).", notify.QUIET)
 
 
 def _how(info):
@@ -71,8 +81,8 @@ def collect_source(name, start):
         res = prim(cut)
         items, info = res if isinstance(res, tuple) else (res, {})
         detail = _how(info)
-        if st.get("mode") not in ("primary", None) and st.get("mode") != "nokey":
-            _notice(name, "primary")
+        if st.get("mode") != "nokey":
+            _notice(name, "primary", st.get("mode"))
         store.src_set(name, last_ok=iso(start), mode="primary", fails=0, last_error="")  # last_cut بعد حفظ المنشورات (run)
         return items, "primary " + detail
     except Exception as e:
@@ -82,13 +92,15 @@ def collect_source(name, start):
         items = fb(cut)
         if items is None:
             raise RuntimeError("no fallback")
-        if st.get("mode") != "fallback" and not nokey:
-            _notice(name, "fallback")
+        if not nokey:
+            _notice(name, "fallback", st.get("mode"))
         store.src_set(name, last_ok=iso(start), mode="fallback", fails=0, last_error=err)
         return items, "fallback (" + err + ")"
     except Exception as e2:
         mode = "nokey" if nokey and isinstance(e2, (NoBackend, RuntimeError, simple.SourceDown, tiktok.SourceDown)) else "down"
-        if st.get("mode") != mode and (mode == "down" or not st.get("last_error")):
+        if mode == "down":
+            _notice(name, "down", st.get("mode"))
+        elif st.get("mode") != mode and not st.get("last_error"):
             _notice(name, mode)
         store.src_set(name, mode=mode, fails=(st.get("fails") or 0) + 1, last_error=err + " | " + str(e2)[:100])
         return [], f"{mode}: {err}"
@@ -221,11 +233,17 @@ def run():
             detail["deferred"] = len(keep) - len(res)
             log.warning("وقت الدورة قارب ينتهي: %s منشورًا يكمّل تصنيفها في الدورة الجاية", detail["deferred"])
             keep = keep[:len(res)]
-        ai_mode = "rules" if used == {"rules"} else "ai"
-        if keep and store.kv_get("ai_mode", "ai") != ai_mode:
-            store.kv_set("ai_mode", ai_mode)
-            notify.send("حالة الرصد", "التصنيف الذكي غير متاح الآن، والرصد مستمر بالقواعد (دقة أقل)." if ai_mode == "rules"
-                        else "التصنيف الذكي رجع يعمل.", notify.QUIET)
+        if used == {"rules"}:
+            detail["ai_err"] = llm.last_error()
+        if keep:  # بلا تذبذب: يُعلن بعد 3 دورات متتالية بالقواعد، والرجوع بعد 3 دورات سليمة
+            init = "rules" if store.kv_get("ai_mode", "ai") == "rules" else ""
+            ev, since = health.streak("ai", used == {"rules"}, init_alert=init)
+            store.kv_set("ai_mode", "rules" if used == {"rules"} else "ai")
+            if ev == "alert":
+                notify.send("حالة الرصد", f"التصنيف الذكي غير متاح من الساعة {health._t(since)}، "
+                            "والرصد مستمر بالقواعد (دقة أقل).", notify.QUIET)
+            elif ev == "back":
+                notify.send("حالة الرصد", f"التصنيف الذكي رجع يعمل (كان متوقف من {health._t(since)}).", notify.QUIET)
         for it, c in zip(keep, res):
             it.update(c)
         relevant = [it for it in keep if it.get("relevance") in ("مؤكد", "محتمل")]

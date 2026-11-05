@@ -145,19 +145,55 @@ def note():
     return ("⚠️ " + "، ".join(out)) if out else ""
 
 
+STREAK_BAD = 3       # 3 دورات سيئة متتالية (ساعة ونص) = عطل يستاهل رسالة
+STREAK_OK = 3        # 3 دورات سليمة متتالية = رجع فعلًا (مو تذبذب)
+
+
+def streak(key, bad, level="", init_alert=""):
+    """عدّاد عطل متتالٍ ضد التذبذب. تعثّر دورة أو دورتين ما يرسل شي.
+    يرجع (حدث، وقت البداية): "alert" أول ما يكمل العطل 3 دورات متتالية، "worse" إذا صار down بعد تنبيه fallback،
+    "back" بعد 3 دورات سليمة متتالية بعد تنبيه، وإلا None.
+    init_alert: حالة قديمة معروفة (مثل مصدر على البديل من قبل التحديث) حتى لا تُرسل رسالة جديدة عن عطل قديم."""
+    allst = store.kv_get("streaks") or {}
+    s = allst.get(key)
+    if s is None:
+        s = {"bad": STREAK_BAD if init_alert else 0, "ok": 0, "alert": init_alert or "", "since": None}
+    ev, since, t = None, s.get("since"), iso(now())
+    if bad:
+        s["ok"] = 0
+        s["bad"] = (s.get("bad") or 0) + 1
+        s["since"] = since = s.get("since") or t
+        if not s["alert"] and s["bad"] >= STREAK_BAD:
+            s["alert"], ev = level or "bad", "alert"
+        elif s["alert"] and level == "down" and s["alert"] != "down":
+            s["alert"], ev = "down", "worse"
+    else:
+        s["bad"] = 0
+        s["ok"] = (s.get("ok") or 0) + 1
+        if s["alert"] and s["ok"] >= STREAK_OK:
+            ev, s["alert"], s["since"] = "back", "", None
+        elif not s["alert"]:
+            s["since"] = None
+    allst[key] = s
+    store.kv_set("streaks", allst)
+    return ev, since
+
+
 def summary(detail, status, sheet_ok=None):
     """ملخص الدورة بسطر واحد يُرسل مع نبضة Healthchecks — يظهر في سجل الفحص هناك (تشخيص بدون التابلت)."""
     names = {"x": "X", "tiktok": "تيك توك", "news": "الأخبار", "youtube": "يوتيوب", "telegram": "تيليجرام",
              "apps": "التطبيقات", "reddit": "ريديت", "web": "المنتديات", "maps": "الخرائط"}
     parts = []
     for k, v in (detail.get("sources") or {}).items():
-        how = (v.get("how") or "").split(" (")[0][:70]
+        how = (v.get("how") or "")[:160]  # يشمل نص الخطأ لو المصدر على البديل (تشخيص عن بعد)
         parts.append(f"{names.get(k, k)}: {how} n={v.get('n', 0)}")
     tail = (f"الحالة {status} | جديد {detail.get('new', 0)} | مرشح {detail.get('candidates', 0)} | "
             f"مرتبط {detail.get('relevant', 0)} | تنبيهات مهمة {detail.get('urgent', 0)} اعتيادي {detail.get('grouped', 0)}"
             f" | التصنيف {','.join(detail.get('classifier') or []) or '-'}")
     if detail.get("deferred"):
         tail += f" | مؤجل {detail['deferred']}"
+    if detail.get("ai_err"):
+        tail += " | سبب تعذر الذكاء: " + str(detail["ai_err"])[:400]
     if sheet_ok is not None:
         tail += " | الجدول " + ("✔" if sheet_ok else "✖")
     n = note()
