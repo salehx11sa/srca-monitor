@@ -16,6 +16,13 @@ class AIDown(Exception):
     pass
 
 
+ERRORS = {}  # آخر سبب تعذر لكل طبقة في هذه الدورة (يظهر في نبضة Healthchecks للتشخيص عن بعد)
+
+
+def last_error():
+    return " | ".join(f"{k}: {v}" for k, v in ERRORS.items())
+
+
 def _prompt(batch, examples):
     lines = []
     for i, it in enumerate(batch):
@@ -65,7 +72,7 @@ def _parse(txt, n):
 def _gemini(prompt, n):
     if not config.GEMINI_KEY:
         raise AIDown("NO_GEMINI_KEY")
-    last = None
+    errs = []
     for model in config.GEMINI_MODELS:
         try:
             r = post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
@@ -73,13 +80,13 @@ def _gemini(prompt, n):
                      json={"contents": [{"parts": [{"text": prompt}]}],
                            "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"}})
             if r.status_code != 200:
-                last = f"{model}:HTTP{r.status_code}"
+                errs.append(f"{model}:HTTP{r.status_code}")
                 continue
             parts = r.json()["candidates"][0]["content"]["parts"]
             return _parse("".join(p.get("text", "") for p in parts), n), "gemini:" + model
         except Exception as e:
-            last = f"{model}:{e}"
-    raise AIDown(str(last))
+            errs.append(f"{model}:{type(e).__name__}:{str(e)[:60]}")
+    raise AIDown(" ، ".join(errs) or "no models")
 
 
 def _groq(prompt, n):
@@ -105,6 +112,7 @@ def classify(items, examples=(), batch_size=12, deadline=None):
     """يرجع (نتائج لكل عنصر بنفس الترتيب، الطبقة المستخدمة).
     deadline (وقت يونكس): إذا مر، يوقف قبل الدفعة التالية ويرجع نتائج ما صُنّف فقط (الباقي للدورة الجاية)."""
     results, used = [], set()
+    ERRORS.clear()
     for k in range(0, len(items), batch_size):
         if deadline and results and time.time() > deadline:
             break
@@ -120,6 +128,7 @@ def classify(items, examples=(), batch_size=12, deadline=None):
                 break
             except Exception as e:
                 log.warning("التصنيف %s تعذر: %s", fn.__name__, str(e)[:120])
+                ERRORS[fn.__name__.strip("_")] = str(e)[:300]
         if got is None:
             used.add("rules")
             results += [rules.classify(it) for it in batch]
